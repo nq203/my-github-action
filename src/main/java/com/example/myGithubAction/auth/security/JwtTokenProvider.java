@@ -1,4 +1,4 @@
-package com.example.myGithubAction.security;
+package com.example.myGithubAction.auth.security;
 
 import io.jsonwebtoken.Claims;
 import io.jsonwebtoken.Jwts;

@@ -9,7 +9,8 @@ import com.example.myGithubAction.auth.entity.User;
 import com.example.myGithubAction.auth.exception.BadRequestException;
 import com.example.myGithubAction.auth.exception.ResourceNotFoundException;
 import com.example.myGithubAction.auth.repository.UserRepository;
-import com.example.myGithubAction.security.JwtTokenProvider;
+import com.example.myGithubAction.auth.security.JwtTokenProvider;
+
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
