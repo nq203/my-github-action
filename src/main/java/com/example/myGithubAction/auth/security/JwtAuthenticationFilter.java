@@ -1,4 +1,4 @@
-package com.example.myGithubAction.security;
+package com.example.myGithubAction.auth.security;
 
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
