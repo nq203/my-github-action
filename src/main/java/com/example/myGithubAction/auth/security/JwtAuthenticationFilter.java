@@ -10,6 +10,8 @@ import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Component;
 import org.springframework.web.filter.OncePerRequestFilter;
 
+import com.example.myGithubAction.auth.entity.UserPrincipal;
+
 import java.io.IOException;
 import java.util.ArrayList;
 
@@ -45,6 +47,11 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
                     return;
                 }
 
+                UserPrincipal userPrincipal = new UserPrincipal(
+                    Long.parseLong(jwtTokenProvider.getUserIdFromToken(token)),
+                    jwtTokenProvider.getUsernameFromToken(token)
+                );
+
                 // Step 4: Extract username from token
                 String username = jwtTokenProvider.getUsernameFromToken(token);
 
@@ -52,7 +59,7 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
                 // This allows Spring Security to recognize the user as authenticated
                 UsernamePasswordAuthenticationToken authentication =
                     new UsernamePasswordAuthenticationToken(
-                        username,
+                        userPrincipal,
                         null,
                         new ArrayList<>() // authorities - you can add roles here
                     );
