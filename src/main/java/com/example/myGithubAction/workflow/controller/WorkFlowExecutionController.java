@@ -28,14 +28,19 @@ public class WorkFlowExecutionController {
     // ==================== EXECUTION ENDPOINTS ====================
 
     /**
-     * Start a new workflow execution
+     * Create and start a new workflow execution
      * POST /api/workflow-executions/start
+     *
+     * This endpoint:   
+     * 1. Creates a new execution record (status: PENDING)
+     * 2. Creates execution steps for all workflow steps
+     * 3. Triggers ExecutionEngine to run the execution
      */
     @PostMapping("/start")
     public ResponseEntity<WorkFlowExecutionResponse> startExecution(
             @AuthenticationPrincipal UserPrincipal userPrincipal,
             @RequestBody WorkFlowExecutionRequest request) {
-        WorkFlowExecutionResponse response = executionService.startExecution(userPrincipal.getUserId(), request);
+        WorkFlowExecutionResponse response = executionService.createExecution(userPrincipal.getUserId(), request);
         return ResponseEntity.status(HttpStatus.CREATED).body(response);
     }
 
