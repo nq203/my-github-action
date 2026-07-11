@@ -7,6 +7,8 @@ import lombok.Data;
 import lombok.NoArgsConstructor;
 import java.time.LocalDateTime;
 
+import com.example.myGithubAction.common.ExecutionState;
+
 @Entity
 @Table(name = "workflow_executions")
 @Data
@@ -26,7 +28,8 @@ public class WorkFlowExecution {
     private Long userId;
 
     @Column(nullable = false)
-    private String status; // PENDING, RUNNING, SUCCESS, FAILED, CANCELLED
+    @Enumerated(EnumType.STRING)
+    private ExecutionState status;
 
     @Column(name = "started_at")
     private LocalDateTime startedAt;
@@ -51,7 +54,7 @@ public class WorkFlowExecution {
         createdAt = LocalDateTime.now();
         updatedAt = LocalDateTime.now();
         if (status == null) {
-            status = "PENDING";
+            status = ExecutionState.PENDING;
         }
     }
 

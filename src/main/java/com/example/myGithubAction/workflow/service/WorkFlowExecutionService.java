@@ -4,13 +4,12 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import com.example.myGithubAction.auth.exception.ResourceNotFoundException;
+import com.example.myGithubAction.common.ExecutionState;
 import com.example.myGithubAction.workflow.dto.WorkFlowExecutionRequest;
 import com.example.myGithubAction.workflow.dto.WorkFlowExecutionResponse;
 import com.example.myGithubAction.workflow.dto.WorkFlowExecutionStepResponse;
 import com.example.myGithubAction.workflow.dto.ExecutionStatusUpdateRequest;
-import com.example.myGithubAction.workflow.entity.Step;
-import com.example.myGithubAction.workflow.entity.WorkFlowExecution;
-import com.example.myGithubAction.workflow.entity.WorkFlowExecutionStep;
+import com.example.myGithubAction.workflow.entity.*;
 import com.example.myGithubAction.workflow.repository.WorkFlowRepository;
 import com.example.myGithubAction.workflow.repository.StepRepository;
 import com.example.myGithubAction.workflow.repository.WorkFlowExecutionRepository;
@@ -68,7 +67,7 @@ public class WorkFlowExecutionService {
         WorkFlowExecution execution = WorkFlowExecution.builder()
                 .workflowId(request.getWorkflowId())
                 .userId(userId)
-                .status("PENDING")
+                .status(ExecutionState.PENDING)
                 .build();
 
         WorkFlowExecution savedExecution = executionRepository.save(execution);
@@ -81,7 +80,7 @@ public class WorkFlowExecutionService {
             WorkFlowExecutionStep executionStep = WorkFlowExecutionStep.builder()
                     .executionId(savedExecution.getId())
                     .stepId(step.getId())
-                    .status("PENDING")
+                    .status(ExecutionState.PENDING)
                     .stepOrder(step.getStepOrder())
                     .build();
             executionStepRepository.save(executionStep);
@@ -125,7 +124,7 @@ public class WorkFlowExecutionService {
     /**
      * Get executions by status
      */
-    public List<WorkFlowExecutionResponse> getExecutionsByStatus(String status) {
+    public List<WorkFlowExecutionResponse> getExecutionsByStatus(ExecutionState status) {
         List<WorkFlowExecution> executions = executionRepository.findByStatus(status);
         return executions.stream()
                 .map(this::mapToExecutionResponse)
@@ -140,15 +139,17 @@ public class WorkFlowExecutionService {
         WorkFlowExecution execution = executionRepository.findById(executionId)
                 .orElseThrow(() -> new ResourceNotFoundException("Execution not found with id: " + executionId));
 
-        execution.setStatus(request.getStatus());
+        // Parse status from request
+        ExecutionState status = ExecutionState.valueOf(request.getStatus());
+        execution.setStatus(status);
         execution.setLogs(request.getLogs());
         execution.setErrorMessage(request.getErrorMessage());
 
         // Set time based on status
-        if ("RUNNING".equals(request.getStatus())) {
+        if (ExecutionState.RUNNING.equals(status)) {
             execution.setStartedAt(LocalDateTime.now());
         }
-        if ("SUCCESS".equals(request.getStatus()) || "FAILED".equals(request.getStatus()) || "CANCELLED".equals(request.getStatus())) {
+        if (ExecutionState.SUCCESS.equals(status) || ExecutionState.FAILED.equals(status) || ExecutionState.CANCELLED.equals(status)) {
             execution.setEndedAt(LocalDateTime.now());
         }
 
@@ -164,7 +165,7 @@ public class WorkFlowExecutionService {
         WorkFlowExecution execution = executionRepository.findById(executionId)
                 .orElseThrow(() -> new ResourceNotFoundException("Execution not found with id: " + executionId));
 
-        execution.setStatus("CANCELLED");
+        execution.setStatus(ExecutionState.CANCELLED);
         execution.setEndedAt(LocalDateTime.now());
 
         WorkFlowExecution updatedExecution = executionRepository.save(execution);
@@ -212,19 +213,21 @@ public class WorkFlowExecutionService {
      * Update execution step status
      */
     @Transactional
-    public WorkFlowExecutionStepResponse updateExecutionStepStatus(Long stepId, ExecutionStatusUpdateRequest request) {
+    public WorkFlowExecutionStepResponse updateExecutionExecutionState(Long stepId, ExecutionStatusUpdateRequest request) {
         WorkFlowExecutionStep step = executionStepRepository.findById(stepId)
                 .orElseThrow(() -> new ResourceNotFoundException("Execution step not found with id: " + stepId));
 
-        step.setStatus(request.getStatus());
+        // Parse status from request
+        ExecutionState status = ExecutionState.valueOf(request.getStatus());
+        step.setStatus(status);
         step.setLogs(request.getLogs());
         step.setErrorMessage(request.getErrorMessage());
 
         // Set time based on status
-        if ("RUNNING".equals(request.getStatus())) {
+        if (ExecutionState.RUNNING.equals(status)) {
             step.setStartedAt(LocalDateTime.now());
         }
-        if ("SUCCESS".equals(request.getStatus()) || "FAILED".equals(request.getStatus()) || "SKIPPED".equals(request.getStatus())) {
+        if (ExecutionState.SUCCESS.equals(status) || ExecutionState.FAILED.equals(status) || ExecutionState.CANCELLED.equals(status)) {
             step.setEndedAt(LocalDateTime.now());
 
             // Calculate duration if both times are set
@@ -240,7 +243,7 @@ public class WorkFlowExecutionService {
     /**
      * Get execution steps by status
      */
-    public List<WorkFlowExecutionStepResponse> getExecutionStepsByStatus(String status) {
+    public List<WorkFlowExecutionStepResponse> getExecutionStepsByStatus(ExecutionState status) {
         List<WorkFlowExecutionStep> steps = executionStepRepository.findByStatus(status);
         return steps.stream()
                 .map(this::mapToExecutionStepResponse)
@@ -254,7 +257,7 @@ public class WorkFlowExecutionService {
                 .id(execution.getId())
                 .workflowId(execution.getWorkflowId())
                 .userId(execution.getUserId())
-                .status(execution.getStatus())
+                .status(execution.getStatus().toString())
                 .startedAt(execution.getStartedAt())
                 .endedAt(execution.getEndedAt())
                 .logs(execution.getLogs())
@@ -269,7 +272,7 @@ public class WorkFlowExecutionService {
                 .id(step.getId())
                 .executionId(step.getExecutionId())
                 .stepId(step.getStepId())
-                .status(step.getStatus())
+                .status(step.getStatus().toString())
                 .stepOrder(step.getStepOrder())
                 .startedAt(step.getStartedAt())
                 .endedAt(step.getEndedAt())
