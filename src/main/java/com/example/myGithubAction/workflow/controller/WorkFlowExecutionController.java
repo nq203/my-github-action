@@ -7,6 +7,7 @@ import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.*;
 
 import com.example.myGithubAction.auth.entity.UserPrincipal;
+import com.example.myGithubAction.common.ExecutionState;
 import com.example.myGithubAction.workflow.dto.WorkFlowExecutionRequest;
 import com.example.myGithubAction.workflow.dto.WorkFlowExecutionResponse;
 import com.example.myGithubAction.workflow.dto.WorkFlowExecutionStepResponse;
@@ -79,7 +80,7 @@ public class WorkFlowExecutionController {
      * GET /api/workflow-executions/status/{status}
      */
     @GetMapping("/status/{status}")
-    public ResponseEntity<List<WorkFlowExecutionResponse>> getExecutionsByStatus(@PathVariable String status) {
+    public ResponseEntity<List<WorkFlowExecutionResponse>> getExecutionsByStatus(@PathVariable ExecutionState status) {
         List<WorkFlowExecutionResponse> response = executionService.getExecutionsByStatus(status);
         return ResponseEntity.ok(response);
     }
@@ -143,10 +144,10 @@ public class WorkFlowExecutionController {
      * PATCH /api/workflow-executions/steps/{stepId}/status
      */
     @PatchMapping("/steps/{stepId}/status")
-    public ResponseEntity<WorkFlowExecutionStepResponse> updateExecutionStepStatus(
+    public ResponseEntity<WorkFlowExecutionStepResponse> updateExecutionExecutionState(
             @PathVariable Long stepId,
             @RequestBody ExecutionStatusUpdateRequest request) {
-        WorkFlowExecutionStepResponse response = executionService.updateExecutionStepStatus(stepId, request);
+        WorkFlowExecutionStepResponse response = executionService.updateExecutionExecutionState(stepId, request);
         return ResponseEntity.ok(response);
     }
 
@@ -155,7 +156,7 @@ public class WorkFlowExecutionController {
      * GET /api/workflow-executions/steps/status/{status}
      */
     @GetMapping("/steps/status/{status}")
-    public ResponseEntity<List<WorkFlowExecutionStepResponse>> getExecutionStepsByStatus(@PathVariable String status) {
+    public ResponseEntity<List<WorkFlowExecutionStepResponse>> getExecutionStepsByStatus(@PathVariable ExecutionState status) {
         List<WorkFlowExecutionStepResponse> response = executionService.getExecutionStepsByStatus(status);
         return ResponseEntity.ok(response);
     }
