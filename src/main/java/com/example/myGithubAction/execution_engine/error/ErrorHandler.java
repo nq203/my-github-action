@@ -45,11 +45,22 @@ public class ErrorHandler {
      * @return true if should retry, false otherwise
      */
     public boolean shouldRetry(String errorMessage) {
-        // TODO: Implement retry logic
         // 1. Check if errorMessage is null or empty → return false
+        if (errorMessage == null || errorMessage.trim().isEmpty()) {
+            return false;
+        }
+
         // 2. Convert to lowercase
+        String lowerCase = errorMessage.toLowerCase();
+
         // 3. Check for retryable patterns
-        // 4. Return true if any pattern matches
+        for (String pattern : RETRYABLE_PATTERNS) {
+            if (lowerCase.contains(pattern)) {
+                // 4. Return true if any pattern matches
+                return true;
+            }
+        }
+
         // 5. Return false otherwise
         return false;
     }

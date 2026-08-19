@@ -3,10 +3,12 @@ package com.example.myGithubAction.workflow.controller;
 import com.example.myGithubAction.workflow.dto.CreateStepRequest;
 import com.example.myGithubAction.workflow.dto.StepResponse;
 import com.example.myGithubAction.workflow.service.WorkFlowService;
+import com.example.myGithubAction.auth.entity.UserPrincipal;
 import jakarta.validation.Valid;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.HashMap;
@@ -26,9 +28,12 @@ public class StepController {
 
     /**
      * Add a step to a workflow
+     *
+     * Security: Requires JWT authentication - userId extracted from token
      */
     @PostMapping
     public ResponseEntity<Map<String, Object>> addStep(
+            @AuthenticationPrincipal UserPrincipal userPrincipal,
             @Valid @RequestBody CreateStepRequest request) {
         log.info("Adding step to workflow id: {}", request.getWorkflowId());
         StepResponse response = workFlowService.addStep(request);
@@ -43,10 +48,15 @@ public class StepController {
 
     /**
      * Get all steps for a workflow
+     *
+     * Security: Requires JWT authentication - userId extracted from token
      */
     @GetMapping("/workflow/{workflowId}")
-    public ResponseEntity<Map<String, Object>> getStepsByWorkflowId(@PathVariable Long workflowId) {
-        log.info("Getting steps for workflow id: {}", workflowId);
+    public ResponseEntity<Map<String, Object>> getStepsByWorkflowId(
+            @AuthenticationPrincipal UserPrincipal userPrincipal,
+            @PathVariable Long workflowId) {
+        Long userId = userPrincipal.getUserId();
+        log.info("User {} getting steps for workflow id: {}", userId, workflowId);
         List<StepResponse> response = workFlowService.getStepsByWorkflowId(workflowId);
 
         Map<String, Object> result = new HashMap<>();
@@ -59,10 +69,15 @@ public class StepController {
 
     /**
      * Get a specific step
+     *
+     * Security: Requires JWT authentication - userId extracted from token
      */
     @GetMapping("/{stepId}")
-    public ResponseEntity<Map<String, Object>> getStep(@PathVariable Long stepId) {
-        log.info("Getting step with id: {}", stepId);
+    public ResponseEntity<Map<String, Object>> getStep(
+            @AuthenticationPrincipal UserPrincipal userPrincipal,
+            @PathVariable Long stepId) {
+        Long userId = userPrincipal.getUserId();
+        log.info("User {} getting step with id: {}", userId, stepId);
         StepResponse response = workFlowService.getStep(stepId);
 
         Map<String, Object> result = new HashMap<>();
@@ -74,13 +89,16 @@ public class StepController {
 
     /**
      * Update a step
+     *
+     * Security: Requires JWT authentication - userId extracted from token
      */
     @PutMapping("/{stepId}")
     public ResponseEntity<Map<String, Object>> updateStep(
+            @AuthenticationPrincipal UserPrincipal userPrincipal,
             @PathVariable Long stepId,
             @Valid @RequestBody CreateStepRequest request) {
         log.info("Updating step with id: {}", stepId);
-        StepResponse response = workFlowService.updateStep(stepId, request);
+        StepResposnse response = workFlowService.updateStep(stepId, request);
 
         Map<String, Object> result = new HashMap<>();
         result.put("success", true);
@@ -92,10 +110,15 @@ public class StepController {
 
     /**
      * Remove (delete) a step
+     *
+     * Security: Requires JWT authentication - userId extracted from token
      */
     @DeleteMapping("/{stepId}")
-    public ResponseEntity<Map<String, Object>> removeStep(@PathVariable Long stepId) {
-        log.info("Removing step with id: {}", stepId);
+    public ResponseEntity<Map<String, Object>> removeStep(
+            @AuthenticationPrincipal UserPrincipal userPrincipal,
+            @PathVariable Long stepId) {
+        Long userId = userPrincipal.getUserId();
+        log.info("User {} removing step with id: {}", userId, stepId);
         workFlowService.removeStep(stepId);
 
         Map<String, Object> result = new HashMap<>();
@@ -107,13 +130,16 @@ public class StepController {
 
     /**
      * Move a step to a new position
-     * Request body: {"position": 2}
+     *
+     * Security: Requires JWT authentication - userId extracted from token
      */
     @PostMapping("/{stepId}/move")
     public ResponseEntity<Map<String, Object>> moveStep(
+            @AuthenticationPrincipal UserPrincipal userPrincipal,
             @PathVariable Long stepId,
             @RequestParam Integer position) {
-        log.info("Moving step id: {} to position: {}", stepId, position);
+        Long userId = userPrincipal.getUserId();
+        log.info("User {} moving step id: {} to position: {}", userId, stepId, position);
         List<StepResponse> response = workFlowService.moveStep(stepId, position);
 
         Map<String, Object> result = new HashMap<>();
@@ -126,10 +152,15 @@ public class StepController {
 
     /**
      * Clone a step
+     *
+     * Security: Requires JWT authentication - userId extracted from token
      */
     @PostMapping("/{stepId}/clone")
-    public ResponseEntity<Map<String, Object>> cloneStep(@PathVariable Long stepId) {
-        log.info("Cloning step with id: {}", stepId);
+    public ResponseEntity<Map<String, Object>> cloneStep(
+            @AuthenticationPrincipal UserPrincipal userPrincipal,
+            @PathVariable Long stepId) {
+        Long userId = userPrincipal.getUserId();
+        log.info("User {} cloning step with id: {}", userId, stepId);
         StepResponse response = workFlowService.cloneStep(stepId);
 
         Map<String, Object> result = new HashMap<>();

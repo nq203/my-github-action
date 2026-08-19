@@ -4,6 +4,9 @@ import com.example.myGithubAction.workflow.entity.WorkFlowExecution;
 import com.example.myGithubAction.workflow.entity.WorkFlowExecutionStep;
 import com.example.myGithubAction.execution_engine.executor.StepExecutor;
 import com.example.myGithubAction.execution_engine.logging.LogManager;
+import com.example.myGithubAction.auth.exception.ResourceNotFoundException;
+import com.example.myGithubAction.common.ExecutionState;
+import com.example.myGithubAction.execution_engine.dto.StepExecutionResult;
 import com.example.myGithubAction.execution_engine.error.ErrorHandler;
 import com.example.myGithubAction.workflow.repository.WorkFlowExecutionRepository;
 import com.example.myGithubAction.workflow.repository.WorkFlowExecutionStepRepository;
@@ -63,10 +66,23 @@ public class ExecutionEngine {
     public void startExecution(Long executionId) {
         // TODO: Implement execution start logic
         // 1. Load execution from DB
+        WorkFlowExecution execution = workFlowExecutionRepository.findById(executionId)
+                .orElseThrow(() -> new ResourceNotFoundException("Execution not found"));
+
         // 2. Set status → RUNNING
+        execution.setStatus(ExecutionState.RUNNING);
+        workFlowExecutionRepository.save(execution);
+
         // 3. Load steps in order
+        List<WorkFlowExecutionStep> steps = workFlowExecutionStepRepository.findByExecutionIdOrderByStepOrder(executionId);
+
         // 4. Execute each step sequentially
+        for (WorkFlowExecutionStep step : steps) {
+            executeStep(execution, step);
+        }
+
         // 5. Handle completion
+        handleCompletion(execution);
     }
 
     /**
@@ -79,12 +95,103 @@ public class ExecutionEngine {
      * @param step the execution step
      */
     private void executeStep(WorkFlowExecution execution, WorkFlowExecutionStep step) {
-        // TODO: Implement step execution logic
-        // 1. Set step status → RUNNING
-        // 2. Call StepExecutor.execute()
-        // 3. Check shouldRetry()
-        // 4. Update step status → SUCCESS/FAILED
-        // 5. Capture logs
+        try {
+            // 1. Set step status → RUNNING + timestamp
+            step.setStatus(ExecutionState.RUNNING);
+            step.setStartedAt(LocalDateTime.now());
+            workFlowExecutionStepRepository.save(step);
+
+            // 2. Call StepExecutor.execute() using injected instance
+            StepExecutionResult result =
+                this.stepExecutor.execute(step);
+
+            // 3. Capture logs
+            if (result.getOutput() != null && !result.getOutput().isEmpty()) {
+                logManager.appendLog(step.getId(), result.getOutput());
+            }
+            if (result.getErrorMessage() != null && !result.getErrorMessage().isEmpty()) {
+                logManager.appendLog(step.getId(), "[ERROR] " + result.getErrorMessage());
+            }
+
+            // 4. Update step status → SUCCESS
+            step.setStatus(ExecutionState.SUCCESS);
+            step.setEndedAt(LocalDateTime.now());
+
+            // Calculate duration in milliseconds
+            if (step.getStartedAt() != null) {
+                long durationMs = java.time.Duration.between(
+                    step.getStartedAt(),
+                    step.getEndedAt()
+                ).toMillis();
+                step.setDuration(durationMs);
+            }
+
+            workFlowExecutionStepRepository.save(step);
+
+        } catch (Exception e) {
+            // 3. Check shouldRetry()
+            if (errorHandler.shouldRetry(e.getMessage())) {
+                // Get retry count, default to 0 if null
+                int retryCount = step.getId() != null ? getRetryCount(step) : 0;
+                int maxRetries = 3;
+
+                if (retryCount < maxRetries) {
+                    // Log retry attempt
+                    logManager.appendLog(step.getId(),
+                        String.format("Retry attempt %d/%d: %s",
+                            retryCount + 1, maxRetries, e.getMessage()));
+
+                    // Wait before retry
+                    try {
+                        Thread.sleep(RETRY_DELAY_MS);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                    }
+
+                    // Recursive retry
+                    executeStep(execution, step);
+                    return;
+                }
+            }
+
+            // 4. Update step status → FAILED
+            step.setStatus(ExecutionState.FAILED);
+            step.setErrorMessage(e.getMessage());
+            step.setEndedAt(LocalDateTime.now());
+
+            // Calculate duration in milliseconds
+            if (step.getStartedAt() != null) {
+                long durationMs = java.time.Duration.between(
+                    step.getStartedAt(),
+                    step.getEndedAt()
+                ).toMillis();
+                step.setDuration(durationMs);
+            }
+
+            // Capture error log
+            logManager.appendLog(step.getId(), "[FAILED] " + e.getMessage());
+            workFlowExecutionStepRepository.save(step);
+
+            // 5. Handle workflow error
+            handleError(execution, e);
+        }
+    }
+
+    /**
+     * Helper method to get retry count for a step.
+     *
+     * @param step the execution step
+     * @return retry count from database
+     */
+    private int getRetryCount(WorkFlowExecutionStep step) {
+        // Use a separate counter mechanism or store in logs
+        // For now, retrieve from database to check how many times executed
+        java.util.List<WorkFlowExecutionStep> steps =
+            workFlowExecutionStepRepository.findByExecutionId(step.getExecutionId());
+        return (int) steps.stream()
+            .filter(s -> s.getStepId().equals(step.getStepId()))
+            .filter(s -> s.getStatus() == ExecutionState.FAILED)
+            .count();
     }
 
     /**
@@ -96,12 +203,28 @@ public class ExecutionEngine {
      * @param execution the workflow execution
      */
     private void handleCompletion(WorkFlowExecution execution) {
-        // TODO: Implement completion logic
-        // 1. Determine final status
-        // 2. Set execution.status
-        // 3. Set execution.endedAt
-        // 4. Save to database
-        // 5. Flush logs
+        // 1. Load all steps for this execution
+        java.util.List<WorkFlowExecutionStep> steps = workFlowExecutionStepRepository
+            .findByExecutionId(execution.getId());
+
+        // 2. Determine final status - all steps must be SUCCESS
+        boolean allSuccessful = steps.stream()
+            .allMatch(s -> s.getStatus() == ExecutionState.SUCCESS);
+
+        // 3. Set execution.status
+        ExecutionState finalStatus = allSuccessful
+            ? ExecutionState.SUCCESS
+            : ExecutionState.FAILED;
+        execution.setStatus(finalStatus);
+
+        // 4. Set execution.endedAt
+        execution.setEndedAt(LocalDateTime.now());
+
+        // Save to database
+        workFlowExecutionRepository.save(execution);
+
+        // 5. Flush logs to database
+        logManager.flush();
     }
 
     /**
@@ -114,10 +237,16 @@ public class ExecutionEngine {
      * @param error the exception that occurred
      */
     private void handleError(WorkFlowExecution execution, Exception error) {
-        // TODO: Implement error handling logic
         // 1. Set execution.status → FAILED
+        execution.setStatus(ExecutionState.FAILED);
+
         // 2. Set error message
+        execution.setErrorMessage(error.getMessage());
+
         // 3. Set endedAt timestamp
+        execution.setEndedAt(LocalDateTime.now());
+
         // 4. Save to database
+        workFlowExecutionRepository.save(execution);
     }
 }
