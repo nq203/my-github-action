@@ -1,8 +1,8 @@
 package com.example.myGithubAction.workflow.controller;
 
+import org.springframework.data.repository.query.Param;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
-import org.springframework.security.core.Authentication;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.*;
 
@@ -29,10 +29,21 @@ public class WorkFlowExecutionController {
     // ==================== EXECUTION ENDPOINTS ====================
 
     /**
+     * Get all executions for current user
+     * GET /api/workflow-executions (alias for frontend /api/executions)
+     */
+    @GetMapping
+    public ResponseEntity<List<WorkFlowExecutionResponse>> getAllExecutions(
+            @AuthenticationPrincipal UserPrincipal userPrincipal) {
+        List<WorkFlowExecutionResponse> response = executionService.getExecutionsByUserId(userPrincipal.getUserId());
+        return ResponseEntity.ok(response);
+    }
+
+    /**
      * Create and start a new workflow execution
      * POST /api/workflow-executions/start
      *
-     * This endpoint:   
+     * This endpoint:
      * 1. Creates a new execution record (status: PENDING)
      * 2. Creates execution steps for all workflow steps
      * 3. Triggers ExecutionEngine to run the execution

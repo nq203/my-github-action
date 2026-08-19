@@ -59,10 +59,10 @@ public class WorkFlowService {
     }
 
     /**
-     * Get workflow by ID
+     * Get workflow by ID with all steps
      */
     public WorkFlowResponse getWorkflow(Long id) {
-        Optional<WorkFlow> workflow = workFlowRepository.findById(id);
+        Optional<WorkFlow> workflow = workFlowRepository.findByIdWithSteps(id);
         if (workflow.isEmpty()) {
             throw new ResourceNotFoundException("Workflow not found with id: " + id);
         }
@@ -71,10 +71,10 @@ public class WorkFlowService {
     }
 
     /**
-     * Get all workflows for a user
+     * Get all workflows for a user with all steps
      */
     public List<WorkFlowResponse> getWorkflowsByUserId(Long userId) {
-        List<WorkFlow> workflows = workFlowRepository.findByUserId(userId);
+        List<WorkFlow> workflows = workFlowRepository.findByUserIdWithSteps(userId);
         return workflows.stream()
                 .map(this::mapToWorkFlowResponse)
                 .collect(Collectors.toList());
@@ -248,6 +248,14 @@ public class WorkFlowService {
     // ==================== HELPER METHODS ====================
 
     private WorkFlowResponse mapToWorkFlowResponse(WorkFlow workflow) {
+        // Steps are already loaded via FETCH JOIN or from entity relationship
+        List<StepResponse> stepResponses = new ArrayList<>();
+        if (workflow.getSteps() != null) {
+            stepResponses = workflow.getSteps().stream()
+                    .map(this::mapToStepResponse)
+                    .collect(Collectors.toList());
+        }
+
         return WorkFlowResponse.builder()
                 .id(workflow.getId())
                 .userId(workflow.getUserId())
@@ -255,6 +263,7 @@ public class WorkFlowService {
                 .description(workflow.getDescription())
                 .createdAt(workflow.getCreatedAt())
                 .updatedAt(workflow.getUpdatedAt())
+                .steps(stepResponses)
                 .build();
     }
 

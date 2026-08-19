@@ -27,6 +27,9 @@ public class WorkFlowExecutionStep {
     @Column(name = "step_id", nullable = false)
     private Long stepId;
 
+    @Column(name = "command", nullable = false)
+    private String command;
+
     @Column(nullable = false)
     @Enumerated(EnumType.STRING)
     private ExecutionState status;

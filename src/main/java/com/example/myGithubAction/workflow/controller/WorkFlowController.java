@@ -23,10 +23,8 @@ public class WorkFlowController {
 
     private final WorkFlowService workFlowService;
 
-    private final JwtTokenProvider jwtTokenProvider;
 
-    public WorkFlowController(WorkFlowService workFlowService, JwtTokenProvider jwtTokenProvider) {
-        this.jwtTokenProvider = jwtTokenProvider;
+    public WorkFlowController(WorkFlowService workFlowService) {
         this.workFlowService = workFlowService;
     }
 
@@ -37,9 +35,8 @@ public class WorkFlowController {
     @PostMapping
     public ResponseEntity<Map<String, Object>> createWorkflow(
             @AuthenticationPrincipal UserPrincipal userPrincipal,
-            @RequestParam Long userId,
             @Valid @RequestBody CreateWorkFlowRequest request) {
-        // Long userId = userPrincipal.getUserId();
+        Long userId = userPrincipal.getUserId();
         if(userId == null) {
             log.error("User ID is null in the token");
             Map<String, Object> errorResult = new HashMap<>();
@@ -56,6 +53,30 @@ public class WorkFlowController {
         result.put("data", response);
 
         return ResponseEntity.status(HttpStatus.CREATED).body(result);
+    }
+
+    /**
+     * Get all workflows for the authenticated user
+     */
+    @GetMapping
+    public ResponseEntity<Map<String, Object>> getWorkflows(
+            @AuthenticationPrincipal UserPrincipal userPrincipal) {
+        if (userPrincipal == null) {
+            log.error("User not authenticated");
+            Map<String, Object> errorResult = new HashMap<>();
+            errorResult.put("success", false);
+            errorResult.put("message", "User not authenticated");
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(errorResult);
+        }
+        Long userId = userPrincipal.getUserId();
+        log.info("Getting workflows for userId: {}", userId);
+        List<WorkFlowResponse> response = workFlowService.getWorkflowsByUserId(userId);
+
+        Map<String, Object> result = new HashMap<>();
+        result.put("success", true);
+        result.put("data", response);
+
+        return ResponseEntity.ok(result);
     }
 
     /**
