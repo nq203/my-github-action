@@ -6,6 +6,7 @@ import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 import java.time.LocalDateTime;
+import java.util.List;
 
 import com.example.myGithubAction.common.ExecutionState;
 
@@ -48,6 +49,10 @@ public class WorkFlowExecution {
 
     @Column(name = "updated_at")
     private LocalDateTime updatedAt;
+
+    @OneToMany(fetch = FetchType.LAZY, cascade = CascadeType.ALL, orphanRemoval = true)
+    @JoinColumn(name = "execution_id")
+    private List<WorkFlowExecutionStep> executionSteps;
 
     @PrePersist
     protected void onCreate() {

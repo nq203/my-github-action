@@ -93,39 +93,39 @@ public class WorkFlowExecutionService {
     }
 
     /**
-     * Get execution by ID
+     * Get execution by ID with all steps
      */
     public WorkFlowExecutionResponse getExecution(Long id) {
-        WorkFlowExecution execution = executionRepository.findById(id)
+        WorkFlowExecution execution = executionRepository.findByIdWithSteps(id)
                 .orElseThrow(() -> new ResourceNotFoundException("Execution not found with id: " + id));
         return mapToExecutionResponse(execution);
     }
 
     /**
-     * Get all executions for a workflow
+     * Get all executions for a workflow with all steps
      */
     public List<WorkFlowExecutionResponse> getExecutionsByWorkflowId(Long workflowId) {
-        List<WorkFlowExecution> executions = executionRepository.findByWorkflowId(workflowId);
+        List<WorkFlowExecution> executions = executionRepository.findByWorkflowIdWithSteps(workflowId);
         return executions.stream()
                 .map(this::mapToExecutionResponse)
                 .collect(Collectors.toList());
     }
 
     /**
-     * Get all executions for a user
+     * Get all executions for a user with all steps
      */
     public List<WorkFlowExecutionResponse> getExecutionsByUserId(Long userId) {
-        List<WorkFlowExecution> executions = executionRepository.findByUserId(userId);
+        List<WorkFlowExecution> executions = executionRepository.findByUserIdWithSteps(userId);
         return executions.stream()
                 .map(this::mapToExecutionResponse)
                 .collect(Collectors.toList());
     }
 
     /**
-     * Get executions by status
+     * Get executions by status with all steps
      */
     public List<WorkFlowExecutionResponse> getExecutionsByStatus(ExecutionState status) {
-        List<WorkFlowExecution> executions = executionRepository.findByStatus(status);
+        List<WorkFlowExecution> executions = executionRepository.findByStatusWithSteps(status);
         return executions.stream()
                 .map(this::mapToExecutionResponse)
                 .collect(Collectors.toList());
@@ -253,7 +253,11 @@ public class WorkFlowExecutionService {
     // ==================== HELPER METHODS ====================
 
     private WorkFlowExecutionResponse mapToExecutionResponse(WorkFlowExecution execution) {
-        return WorkFlowExecutionResponse.builder()
+        return mapToExecutionResponse(execution, true);
+    }
+
+    private WorkFlowExecutionResponse mapToExecutionResponse(WorkFlowExecution execution, boolean includeSteps) {
+        WorkFlowExecutionResponse.WorkFlowExecutionResponseBuilder builder = WorkFlowExecutionResponse.builder()
                 .id(execution.getId())
                 .workflowId(execution.getWorkflowId())
                 .userId(execution.getUserId())
@@ -263,8 +267,20 @@ public class WorkFlowExecutionService {
                 .logs(execution.getLogs())
                 .errorMessage(execution.getErrorMessage())
                 .createdAt(execution.getCreatedAt())
-                .updatedAt(execution.getUpdatedAt())
-                .build();
+                .updatedAt(execution.getUpdatedAt());
+
+        if (includeSteps) {
+            // Steps are already loaded via FETCH JOIN or from entity relationship
+            List<WorkFlowExecutionStepResponse> stepResponses = new ArrayList<>();
+            if (execution.getExecutionSteps() != null) {
+                stepResponses = execution.getExecutionSteps().stream()
+                        .map(this::mapToExecutionStepResponse)
+                        .collect(Collectors.toList());
+            }
+            builder.steps(stepResponses);
+        }
+
+        return builder.build();
     }
 
     private WorkFlowExecutionStepResponse mapToExecutionStepResponse(WorkFlowExecutionStep step) {
