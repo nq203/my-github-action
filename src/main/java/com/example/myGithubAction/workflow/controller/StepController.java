@@ -98,7 +98,7 @@ public class StepController {
             @PathVariable Long stepId,
             @Valid @RequestBody CreateStepRequest request) {
         log.info("Updating step with id: {}", stepId);
-        StepResposnse response = workFlowService.updateStep(stepId, request);
+        StepResponse response = workFlowService.updateStep(stepId, request);
 
         Map<String, Object> result = new HashMap<>();
         result.put("success", true);
