@@ -2,6 +2,8 @@ package com.example.myGithubAction.workflow.service;
 
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import com.example.myGithubAction.auth.exception.ResourceNotFoundException;
 import com.example.myGithubAction.common.ExecutionState;
@@ -50,7 +52,10 @@ public class WorkFlowExecutionService {
      * 1. Validates the workflow exists
      * 2. Creates a WorkFlowExecution record in PENDING status
      * 3. Creates WorkFlowExecutionStep records for each step
-     * 4. Triggers ExecutionEngine to start the execution asynchronously
+     * 4. After transaction commits, triggers ExecutionEngine asynchronously
+     *
+     * The startExecution call is deferred to after-commit so the
+     * ExecutionEngine always sees the persisted execution and steps.
      *
      * @param userId the user ID who triggered the execution
      * @param request the execution request containing workflowId
@@ -86,8 +91,18 @@ public class WorkFlowExecutionService {
             executionStepRepository.save(executionStep);
         }
 
-        // Trigger ExecutionEngine to run the execution
-        executionEngine.startExecution(savedExecution.getId());
+        // Trigger ExecutionEngine AFTER the transaction commits.
+        // This guarantees the execution and steps are visible when
+        // the async engine reads them from the database.
+        final Long executionId = savedExecution.getId();
+        TransactionSynchronizationManager.registerSynchronization(
+            new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    executionEngine.startExecution(executionId);
+                }
+            }
+        );
 
         return mapToExecutionResponse(savedExecution);
     }

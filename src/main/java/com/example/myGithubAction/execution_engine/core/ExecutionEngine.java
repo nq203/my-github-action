@@ -11,8 +11,8 @@ import com.example.myGithubAction.execution_engine.error.ErrorHandler;
 import com.example.myGithubAction.workflow.repository.WorkFlowExecutionRepository;
 import com.example.myGithubAction.workflow.repository.WorkFlowExecutionStepRepository;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
 import java.time.LocalDateTime;
 import java.util.List;
 
@@ -27,7 +27,6 @@ import java.util.List;
  *
  */
 @Service
-@Transactional
 public class ExecutionEngine {
 
     private static final long RETRY_DELAY_MS = 2000;
@@ -54,23 +53,27 @@ public class ExecutionEngine {
     }
 
     /**
-     * Starts execution of a workflow.
+     * Starts execution of a workflow asynchronously.
      *
      * Main entry point for workflow execution.
-     * Performs sequential execution of all steps.
+     * Runs in a separate thread so the calling HTTP request
+     * can return immediately with the execution ID.
+     * Each step is executed in its own transaction so partial
+     * progress is persisted even if a later step fails.
      *
      * @param executionId the execution ID from database
      * @throws ResourceNotFoundException if execution not found
-     * @throws ExecutionException on execution failure
      */
+    @Async("workflowExecutor")
     public void startExecution(Long executionId) {
         // TODO: Implement execution start logic
         // 1. Load execution from DB
         WorkFlowExecution execution = workFlowExecutionRepository.findById(executionId)
                 .orElseThrow(() -> new ResourceNotFoundException("Execution not found"));
 
-        // 2. Set status → RUNNING
+        // 2. Set status → RUNNING and set startedAt
         execution.setStatus(ExecutionState.RUNNING);
+        execution.setStartedAt(LocalDateTime.now());
         workFlowExecutionRepository.save(execution);
 
         // 3. Load steps in order
@@ -113,8 +116,15 @@ public class ExecutionEngine {
                 logManager.appendLog(step.getId(), "[ERROR] " + result.getErrorMessage());
             }
 
-            // 4. Update step status → SUCCESS
-            step.setStatus(ExecutionState.SUCCESS);
+            // 4. Update step status based on result
+            if (result.isSuccess()) {
+                step.setStatus(ExecutionState.SUCCESS);
+            } else {
+                String errorMsg = result.getErrorMessage() != null
+                    ? result.getErrorMessage()
+                    : "Step execution failed with exit code " + result.getExitCode();
+                throw new RuntimeException(errorMsg);
+            }
             step.setEndedAt(LocalDateTime.now());
 
             // Calculate duration in milliseconds
