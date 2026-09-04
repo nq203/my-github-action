@@ -57,15 +57,15 @@ public class CorsConfig {
         configuration.addExposedHeader("X-Page-Number");
         configuration.addExposedHeader("X-Page-Size");
 
-        // ✅ Allow Credentials
+        // Allow Credentials
         // Allows sending cookies and Authorization header with requests
         configuration.setAllowCredentials(true);
 
-        // ✅ Max Age
+        // Max Age
         // Browser caches preflight response for 3600 seconds (1 hour)
         configuration.setMaxAge(3600L);
 
-        // ✅ Register CORS configuration for all paths
+        // Register CORS configuration for all paths
         UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
         source.registerCorsConfiguration("/**", configuration);
 
