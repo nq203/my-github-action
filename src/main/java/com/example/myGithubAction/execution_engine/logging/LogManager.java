@@ -1,7 +1,6 @@
 package com.example.myGithubAction.execution_engine.logging;
 
 import org.springframework.stereotype.Component;
-import org.springframework.beans.factory.annotation.Autowired;
 import com.example.myGithubAction.workflow.repository.WorkFlowExecutionStepRepository;
 import com.example.myGithubAction.workflow.entity.WorkFlowExecutionStep;
 import java.util.Optional;
@@ -21,7 +20,6 @@ public class LogManager {
 
     private final WorkFlowExecutionStepRepository stepRepository;
 
-    @Autowired
     public LogManager(WorkFlowExecutionStepRepository stepRepository) {
         this.stepRepository = stepRepository;
     }
