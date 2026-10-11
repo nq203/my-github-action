@@ -5,6 +5,7 @@ import com.example.myGithubAction.execution_engine.dto.StepExecutionResult;
 import org.springframework.stereotype.Component;
 import java.io.BufferedReader;
 import java.io.*;
+import java.nio.file.Path;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
@@ -43,10 +44,11 @@ public class ShellCommandRunner {
      *                     used to support cancellation mid-run
      * @return execution result with output and status
      */
-    public StepExecutionResult execute(String command, long timeoutMs, Long executionId) {
+    public StepExecutionResult execute(String command, long timeoutMs, Long executionId, Path workingDirectory) {
         try {
             // 1. Create ProcessBuilder with [/bin/bash, -c, command]
             ProcessBuilder processBuilder = new ProcessBuilder(SHELL, SHELL_FLAG, command);
+            processBuilder.directory(workingDirectory.toFile());
 
             // 2. Keep stderr separate to capture both streams concurrently
             processBuilder.redirectErrorStream(false);

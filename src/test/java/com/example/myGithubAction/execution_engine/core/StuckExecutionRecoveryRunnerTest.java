@@ -18,13 +18,15 @@ class StuckExecutionRecoveryRunnerTest {
 
     private WorkFlowExecutionRepository executionRepository;
     private WorkFlowExecutionStepRepository stepRepository;
+    private WorkspaceManager workspaceManager;
     private StuckExecutionRecoveryRunner runner;
 
     @BeforeEach
     void setUp() {
         executionRepository = mock(WorkFlowExecutionRepository.class);
         stepRepository = mock(WorkFlowExecutionStepRepository.class);
-        runner = new StuckExecutionRecoveryRunner(executionRepository, stepRepository);
+        workspaceManager = mock(WorkspaceManager.class);
+        runner = new StuckExecutionRecoveryRunner(executionRepository, stepRepository, workspaceManager);
     }
 
     @Test
@@ -52,6 +54,7 @@ class StuckExecutionRecoveryRunnerTest {
 
         verify(executionRepository).saveAll(List.of(stuckExecution));
         verify(stepRepository).saveAll(List.of(stuckStep));
+        verify(workspaceManager).deleteWorkspace(1L);
     }
 
     @Test

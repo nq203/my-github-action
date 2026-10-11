@@ -3,11 +3,17 @@ package com.example.myGithubAction.execution_engine.executor;
 import com.example.myGithubAction.execution_engine.core.ExecutionCancellationRegistry;
 import com.example.myGithubAction.execution_engine.dto.StepExecutionResult;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+
+import java.nio.file.Path;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 class ShellCommandRunnerTest {
+
+    @TempDir
+    Path workspace;
 
     @Test
     void cancellingMidRunReturnsQuicklyWithoutWaitingOutTimeout() throws InterruptedException {
@@ -22,7 +28,7 @@ class ShellCommandRunnerTest {
         long start = System.currentTimeMillis();
 
         Thread runnerThread = new Thread(() ->
-            resultHolder[0] = runner.execute("sleep 5", 10000, executionId));
+            resultHolder[0] = runner.execute("sleep 5", 10000, executionId, workspace));
         runnerThread.start();
 
         Thread.sleep(300);
@@ -43,10 +49,22 @@ class ShellCommandRunnerTest {
         ShellCommandRunner runner = new ShellCommandRunner(registry);
         registry.register(2L);
 
-        StepExecutionResult result = runner.execute("echo hello", 5000, 2L);
+        StepExecutionResult result = runner.execute("echo hello", 5000, 2L, workspace);
 
         assertTrue(result.isSuccess());
         assertEquals(0, result.getExitCode());
         assertTrue(result.getOutput().contains("hello"));
+    }
+
+    @Test
+    void commandRunsInsideProvidedWorkingDirectory() throws Exception {
+        ExecutionCancellationRegistry registry = new ExecutionCancellationRegistry();
+        ShellCommandRunner runner = new ShellCommandRunner(registry);
+        registry.register(3L);
+
+        StepExecutionResult result = runner.execute("pwd", 5000, 3L, workspace);
+
+        assertTrue(result.isSuccess());
+        assertEquals(workspace.toRealPath().toString(), result.getOutput());
     }
 }

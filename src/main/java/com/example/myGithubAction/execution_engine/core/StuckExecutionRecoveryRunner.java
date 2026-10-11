@@ -26,12 +26,15 @@ public class StuckExecutionRecoveryRunner implements CommandLineRunner {
 
     private final WorkFlowExecutionRepository executionRepository;
     private final WorkFlowExecutionStepRepository stepRepository;
+    private final WorkspaceManager workspaceManager;
 
     public StuckExecutionRecoveryRunner(
             WorkFlowExecutionRepository executionRepository,
-            WorkFlowExecutionStepRepository stepRepository) {
+            WorkFlowExecutionStepRepository stepRepository,
+            WorkspaceManager workspaceManager) {
         this.executionRepository = executionRepository;
         this.stepRepository = stepRepository;
+        this.workspaceManager = workspaceManager;
     }
 
     @Override
@@ -40,6 +43,7 @@ public class StuckExecutionRecoveryRunner implements CommandLineRunner {
 
         List<WorkFlowExecution> stuckExecutions = executionRepository.findByStatus(ExecutionState.RUNNING);
         for (WorkFlowExecution execution : stuckExecutions) {
+            workspaceManager.deleteWorkspace(execution.getId());
             execution.setStatus(ExecutionState.FAILED);
             execution.setErrorMessage(INTERRUPTED_MESSAGE);
             execution.setEndedAt(now);
