@@ -37,6 +37,7 @@ public class ExecutionEngine {
     private final LogManager logManager;
     private final ErrorHandler errorHandler;
     private final ExecutionCancellationRegistry cancellationRegistry;
+    private final WorkspaceManager workspaceManager;
 
     public ExecutionEngine(
             WorkFlowExecutionRepository workFlowExecutionRepository,
@@ -44,13 +45,15 @@ public class ExecutionEngine {
             StepExecutor stepExecutor,
             LogManager logManager,
             ErrorHandler errorHandler,
-            ExecutionCancellationRegistry cancellationRegistry) {
+            ExecutionCancellationRegistry cancellationRegistry,
+            WorkspaceManager workspaceManager) {
         this.workFlowExecutionRepository = workFlowExecutionRepository;
         this.workFlowExecutionStepRepository = workFlowExecutionStepRepository;
         this.stepExecutor = stepExecutor;
         this.logManager = logManager;
         this.errorHandler = errorHandler;
         this.cancellationRegistry = cancellationRegistry;
+        this.workspaceManager = workspaceManager;
     }
 
     /**
@@ -68,6 +71,7 @@ public class ExecutionEngine {
     @Async("workflowExecutor")
     public void startExecution(Long executionId) {
         cancellationRegistry.register(executionId);
+        boolean workspaceCreated = false;
         try {
             // 1. Load execution from DB
             WorkFlowExecution execution = workFlowExecutionRepository.findById(executionId)
@@ -76,6 +80,16 @@ public class ExecutionEngine {
             if (cancellationRegistry.isCancelled(executionId)) {
                 // Cancelled before this async task even started (e.g. while PENDING) -
                 // DB status is already CANCELLED, don't overwrite it with RUNNING.
+                return;
+            }
+
+            try {
+                workspaceManager.createWorkspace(executionId);
+                workspaceCreated = true;
+            } catch (Exception e) {
+                if (!cancellationRegistry.isCancelled(executionId)) {
+                    handleError(execution, e);
+                }
                 return;
             }
 
@@ -104,6 +118,9 @@ public class ExecutionEngine {
             // 5. Handle completion
             handleCompletion(execution);
         } finally {
+            if (workspaceCreated) {
+                workspaceManager.deleteWorkspace(executionId);
+            }
             cancellationRegistry.unregister(executionId);
         }
     }

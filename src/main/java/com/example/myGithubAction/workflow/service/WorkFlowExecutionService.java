@@ -21,6 +21,7 @@ import com.example.myGithubAction.execution_engine.core.ExecutionCancellationReg
 
 import java.time.LocalDateTime;
 import java.util.*;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.stream.Collectors;
 
 @Service
@@ -103,12 +104,32 @@ public class WorkFlowExecutionService {
             new TransactionSynchronization() {
                 @Override
                 public void afterCommit() {
-                    executionEngine.startExecution(executionId);
+                    try {
+                        executionEngine.startExecution(executionId);
+                    } catch (RejectedExecutionException e) {
+                        markExecutionRejected(executionId);
+                    }
                 }
             }
         );
 
         return mapToExecutionResponse(savedExecution);
+    }
+
+    /**
+     * Marks an execution FAILED when the workflow executor's thread pool
+     * and queue are both full, so a rejected submission doesn't leave the
+     * execution silently stuck PENDING forever.
+     *
+     * @param executionId the execution that could not be submitted
+     */
+    private void markExecutionRejected(Long executionId) {
+        executionRepository.findById(executionId).ifPresent(execution -> {
+            execution.setStatus(ExecutionState.FAILED);
+            execution.setErrorMessage("Execution rejected: thread pool and queue are full");
+            execution.setEndedAt(LocalDateTime.now());
+            executionRepository.save(execution);
+        });
     }
 
     /**

@@ -1,5 +1,6 @@
 package com.example.myGithubAction.execution_engine.executor;
 
+import com.example.myGithubAction.execution_engine.core.WorkspaceManager;
 import com.example.myGithubAction.workflow.entity.WorkFlowExecutionStep;
 import com.example.myGithubAction.workflow.entity.Step;
 import com.example.myGithubAction.workflow.repository.StepRepository;
@@ -28,16 +29,19 @@ public class StepExecutor {
     private final LogManager logManager;
     private final StepRepository stepRepository;
     private final CommandValidator commandValidator;
+    private final WorkspaceManager workspaceManager;
 
     public StepExecutor(
             ShellCommandRunner commandRunner,
             LogManager logManager,
             StepRepository stepRepository,
-            CommandValidator commandValidator) {
+            CommandValidator commandValidator,
+            WorkspaceManager workspaceManager) {
         this.commandRunner = commandRunner;
         this.logManager = logManager;
         this.stepRepository = stepRepository;
         this.commandValidator = commandValidator;
+        this.workspaceManager = workspaceManager;
     }
 
     /**
@@ -75,7 +79,11 @@ public class StepExecutor {
             }
 
             // 4. Call commandRunner.execute()
-            StepExecutionResult result = commandRunner.execute(command, DEFAULT_TIMEOUT_MS, step.getExecutionId());
+            StepExecutionResult result = commandRunner.execute(
+                command,
+                DEFAULT_TIMEOUT_MS,
+                step.getExecutionId(),
+                workspaceManager.resolveWorkspacePath(step.getExecutionId()));
 
             // 5. Log results
             if (result.isSuccess()) {

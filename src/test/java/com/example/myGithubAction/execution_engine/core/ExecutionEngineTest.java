@@ -12,6 +12,7 @@ import com.example.myGithubAction.workflow.repository.WorkFlowExecutionStepRepos
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.nio.file.Path;
 import java.util.List;
 import java.util.Optional;
 
@@ -29,17 +30,23 @@ class ExecutionEngineTest {
     private LogManager logManager;
     private ErrorHandler errorHandler;
     private ExecutionCancellationRegistry cancellationRegistry;
+    private WorkspaceManager workspaceManager;
     private ExecutionEngine engine;
 
     @BeforeEach
-    void setUp() {
+    void setUp() throws Exception {
         executionRepository = mock(WorkFlowExecutionRepository.class);
         stepRepository = mock(WorkFlowExecutionStepRepository.class);
         stepExecutor = mock(StepExecutor.class);
         logManager = mock(LogManager.class);
         errorHandler = new ErrorHandler();
         cancellationRegistry = new ExecutionCancellationRegistry();
-        engine = new ExecutionEngine(executionRepository, stepRepository, stepExecutor, logManager, errorHandler, cancellationRegistry);
+        workspaceManager = mock(WorkspaceManager.class);
+        doReturn(Path.of(System.getProperty("java.io.tmpdir"), "workspace-1"))
+            .when(workspaceManager).createWorkspace(anyLong());
+        engine = new ExecutionEngine(
+            executionRepository, stepRepository, stepExecutor, logManager,
+            errorHandler, cancellationRegistry, workspaceManager);
 
         when(stepRepository.save(any(WorkFlowExecutionStep.class)))
             .thenAnswer(invocation -> invocation.getArgument(0));
@@ -65,7 +72,7 @@ class ExecutionEngineTest {
     }
 
     @Test
-    void retriesAtMostThreeTimesThenFails() {
+    void retriesAtMostThreeTimesThenFails() throws Exception {
         Long executionId = 1L;
         WorkFlowExecution execution = execution(executionId);
         WorkFlowExecutionStep step = step(10L, executionId, 0);
@@ -78,12 +85,14 @@ class ExecutionEngineTest {
 
         // 1 initial attempt + 3 retries = 4 calls
         verify(stepExecutor, times(4)).execute(any());
+        verify(workspaceManager).createWorkspace(executionId);
+        verify(workspaceManager).deleteWorkspace(executionId);
         assertEquals(ExecutionState.FAILED, step.getStatus());
         assertEquals(ExecutionState.FAILED, execution.getStatus());
     }
 
     @Test
-    void stepFailureStopsSubsequentSteps() {
+    void stepFailureStopsSubsequentSteps() throws Exception {
         Long executionId = 2L;
         WorkFlowExecution execution = execution(executionId);
         WorkFlowExecutionStep step1 = step(20L, executionId, 0);
@@ -101,6 +110,8 @@ class ExecutionEngineTest {
         verify(stepExecutor, times(1)).execute(step1);
         verify(stepExecutor, times(1)).execute(step2);
         verify(stepExecutor, never()).execute(step3);
+        verify(workspaceManager).createWorkspace(executionId);
+        verify(workspaceManager).deleteWorkspace(executionId);
         assertEquals(ExecutionState.SUCCESS, step1.getStatus());
         assertEquals(ExecutionState.FAILED, step2.getStatus());
         assertEquals(ExecutionState.PENDING, step3.getStatus());
@@ -108,7 +119,7 @@ class ExecutionEngineTest {
     }
 
     @Test
-    void cancellationStopsRemainingStepsAndDoesNotOverwriteStatus() {
+    void cancellationStopsRemainingStepsAndDoesNotOverwriteStatus() throws Exception {
         Long executionId = 3L;
         WorkFlowExecution execution = execution(executionId);
         execution.setStatus(ExecutionState.CANCELLED); // simulates cancelExecution() having already run
@@ -125,6 +136,8 @@ class ExecutionEngineTest {
         assertTimeoutPreemptively(ofSeconds(5), () -> engine.startExecution(executionId));
 
         verify(stepExecutor, never()).execute(any());
+        verify(workspaceManager, never()).createWorkspace(executionId);
+        verify(workspaceManager, never()).deleteWorkspace(executionId);
         assertEquals(ExecutionState.CANCELLED, execution.getStatus());
     }
 }
