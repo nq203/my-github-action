@@ -17,6 +17,7 @@ import com.example.myGithubAction.workflow.repository.StepRepository;
 import com.example.myGithubAction.workflow.repository.WorkFlowExecutionRepository;
 import com.example.myGithubAction.workflow.repository.WorkFlowExecutionStepRepository;
 import com.example.myGithubAction.execution_engine.core.ExecutionEngine;
+import com.example.myGithubAction.execution_engine.core.ExecutionCancellationRegistry;
 
 import java.time.LocalDateTime;
 import java.util.*;
@@ -29,18 +30,21 @@ public class WorkFlowExecutionService {
     private final WorkFlowRepository workflowRepository;
     private final StepRepository stepRepository;
     private final ExecutionEngine executionEngine;
+    private final ExecutionCancellationRegistry cancellationRegistry;
 
     public WorkFlowExecutionService(
             WorkFlowExecutionRepository executionRepository,
             WorkFlowExecutionStepRepository executionStepRepository,
             WorkFlowRepository workflowRepository,
             StepRepository stepRepository,
-            ExecutionEngine executionEngine) {
+            ExecutionEngine executionEngine,
+            ExecutionCancellationRegistry cancellationRegistry) {
         this.executionRepository = executionRepository;
         this.executionStepRepository = executionStepRepository;
         this.workflowRepository = workflowRepository;
         this.stepRepository = stepRepository;
         this.executionEngine = executionEngine;
+        this.cancellationRegistry = cancellationRegistry;
     }
 
     // ==================== WORKFLOW EXECUTION METHODS ====================
@@ -184,6 +188,7 @@ public class WorkFlowExecutionService {
         execution.setEndedAt(LocalDateTime.now());
 
         WorkFlowExecution updatedExecution = executionRepository.save(execution);
+        cancellationRegistry.cancel(executionId);
         return mapToExecutionResponse(updatedExecution);
     }
 

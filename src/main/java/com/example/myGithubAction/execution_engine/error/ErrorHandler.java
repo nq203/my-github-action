@@ -39,12 +39,18 @@ public class ErrorHandler {
      * Determines if an error should trigger a retry.
      *
      * Checks error message for retryable patterns.
-     * Returns false for non-retryable errors.
+     * Returns false for non-retryable errors, and false if the execution
+     * has already been cancelled (no point retrying a cancelled run).
      *
      * @param errorMessage the error message
+     * @param cancelled whether the owning execution has been cancelled
      * @return true if should retry, false otherwise
      */
-    public boolean shouldRetry(String errorMessage) {
+    public boolean shouldRetry(String errorMessage, boolean cancelled) {
+        if (cancelled) {
+            return false;
+        }
+
         // 1. Check if errorMessage is null or empty → return false
         if (errorMessage == null || errorMessage.trim().isEmpty()) {
             return false;

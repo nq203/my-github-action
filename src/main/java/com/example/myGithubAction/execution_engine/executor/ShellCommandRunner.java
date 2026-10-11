@@ -1,5 +1,6 @@
 package com.example.myGithubAction.execution_engine.executor;
 
+import com.example.myGithubAction.execution_engine.core.ExecutionCancellationRegistry;
 import com.example.myGithubAction.execution_engine.dto.StepExecutionResult;
 import org.springframework.stereotype.Component;
 import java.io.BufferedReader;
@@ -22,6 +23,13 @@ public class ShellCommandRunner {
 
     private static final String SHELL = "/bin/bash";
     private static final String SHELL_FLAG = "-c";
+    private static final long POLL_INTERVAL_MS = 300;
+
+    private final ExecutionCancellationRegistry cancellationRegistry;
+
+    public ShellCommandRunner(ExecutionCancellationRegistry cancellationRegistry) {
+        this.cancellationRegistry = cancellationRegistry;
+    }
 
     /**
      * Executes a bash command.
@@ -31,9 +39,11 @@ public class ShellCommandRunner {
      *
      * @param command the bash command to execute
      * @param timeoutMs timeout in milliseconds
+     * @param executionId the workflow execution this command belongs to,
+     *                     used to support cancellation mid-run
      * @return execution result with output and status
      */
-    public StepExecutionResult execute(String command, long timeoutMs) {
+    public StepExecutionResult execute(String command, long timeoutMs, Long executionId) {
         try {
             // 1. Create ProcessBuilder with [/bin/bash, -c, command]
             ProcessBuilder processBuilder = new ProcessBuilder(SHELL, SHELL_FLAG, command);
@@ -43,6 +53,7 @@ public class ShellCommandRunner {
 
             // 3. Start process
             Process process = processBuilder.start();
+            cancellationRegistry.registerProcess(executionId, process);
 
             // 4. Create synchronized buffer for output collection
             StringBuilder stdoutBuffer = new StringBuilder();
@@ -73,18 +84,43 @@ public class ShellCommandRunner {
             stderrReader.setDaemon(true);
             stderrReader.start();
 
-            // 6. Wait with timeout
-            boolean finished = process.waitFor(timeoutMs, TimeUnit.MILLISECONDS);
+            // 6. Wait with timeout, polling so cancellation can interrupt mid-run
+            long deadline = System.currentTimeMillis() + timeoutMs;
+            boolean finished = false;
+            boolean cancelled = false;
+            while (System.currentTimeMillis() < deadline) {
+                finished = process.waitFor(POLL_INTERVAL_MS, TimeUnit.MILLISECONDS);
+                if (finished) {
+                    break;
+                }
+                if (cancellationRegistry.isCancelled(executionId)) {
+                    cancelled = true;
+                    break;
+                }
+            }
+
+            if (cancelled) {
+                process.destroyForcibly();
+                cancellationRegistry.clearProcess(executionId);
+                return StepExecutionResult.builder()
+                    .exitCode(-1)
+                    .errorMessage("Cancelled")
+                    .success(false)
+                    .build();
+            }
 
             if (!finished) {
                 // 7. Handle timeout case (destroy process)
                 process.destroyForcibly();
+                cancellationRegistry.clearProcess(executionId);
                 return StepExecutionResult.builder()
                     .exitCode(-1)
                     .errorMessage("Command execution timed out after " + timeoutMs + "ms")
                     .success(false)
                     .build();
             }
+
+            cancellationRegistry.clearProcess(executionId);
 
             // 8. Wait for reader threads to complete (with timeout)
             stdoutReader.join(1000);

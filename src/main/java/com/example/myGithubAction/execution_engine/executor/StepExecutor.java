@@ -7,7 +7,6 @@ import com.example.myGithubAction.execution_engine.dto.StepExecutionResult;
 import com.example.myGithubAction.execution_engine.exception.StepExecutionException;
 import com.example.myGithubAction.execution_engine.logging.LogManager;
 import com.example.myGithubAction.execution_engine.executor.CommandValidator.CommandValidationException;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 /**
@@ -30,7 +29,6 @@ public class StepExecutor {
     private final StepRepository stepRepository;
     private final CommandValidator commandValidator;
 
-    @Autowired
     public StepExecutor(
             ShellCommandRunner commandRunner,
             LogManager logManager,
@@ -77,7 +75,7 @@ public class StepExecutor {
             }
 
             // 4. Call commandRunner.execute()
-            StepExecutionResult result = commandRunner.execute(command, DEFAULT_TIMEOUT_MS);
+            StepExecutionResult result = commandRunner.execute(command, DEFAULT_TIMEOUT_MS, step.getExecutionId());
 
             // 5. Log results
             if (result.isSuccess()) {
