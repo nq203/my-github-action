@@ -18,6 +18,8 @@ public class ExecutionKafkaProperties {
         private String requested = "workflow.execution.requested";
         /** CANCEL signals, key = executionId, consumed by every worker. */
         private String cancel = "workflow.execution.cancel";
+        /** Live-monitor status/log events, key = executionId, consumed by every API instance. */
+        private String events = "workflow.execution.events";
         private int partitions = 6;
         private short replicationFactor = 1;
 

@@ -43,4 +43,14 @@ public class KafkaConfig {
                 .replicas(topics.getReplicationFactor())
                 .build();
     }
+
+    @Bean
+    public NewTopic executionEventsTopic(ExecutionKafkaProperties properties) {
+        ExecutionKafkaProperties.Topics topics = properties.getTopics();
+        return TopicBuilder.name(topics.getEvents())
+                .partitions(6)
+                .replicas(topics.getReplicationFactor())
+                .config("retention.ms", String.valueOf(60 * 60 * 1000L))
+                .build();
+    }
 }
