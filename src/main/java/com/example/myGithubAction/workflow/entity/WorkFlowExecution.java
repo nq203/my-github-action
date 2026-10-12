@@ -38,6 +38,18 @@ public class WorkFlowExecution {
     @Column(name = "ended_at")
     private LocalDateTime endedAt;
 
+    /** Worker instance that claimed this execution; null until claimed. */
+    @Column(name = "worker_id")
+    private String workerId;
+
+    /** Last time the owning worker reported being alive while RUNNING. */
+    @Column(name = "heartbeat_at")
+    private LocalDateTime heartbeatAt;
+
+    /** Last time a START message was published for this execution (while PENDING). */
+    @Column(name = "last_dispatched_at")
+    private LocalDateTime lastDispatchedAt;
+
     @Column(columnDefinition = "TEXT")
     private String logs;
 

@@ -19,6 +19,41 @@ spring:
         dialect: org.hibernate.dialect.PostgreSQLDialect
         ddl-auto: none
 
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    producer:
+      acks: all
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      properties:
+        enable.idempotence: true
+    consumer:
+      enable-auto-commit: false
+      auto-offset-reset: earliest
+      max-poll-records: 1
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+    listener:
+      ack-mode: record
+
+# Execution dispatch. enabled=false falls back to the in-process thread pool.
+# consumer.enabled=false makes this instance API-only (publishes, never runs executions).
+app:
+  kafka:
+    enabled: ${APP_KAFKA_ENABLED:true}
+    consumer:
+      enabled: ${APP_KAFKA_CONSUMER_ENABLED:true}
+    worker:
+      max-concurrent-executions: ${EXECUTION_MAX_CONCURRENT:4}
+  # Liveness of an instance that runs executions (heartbeat, reaper, sweeper).
+  # Set id to something stable across restarts (e.g. the pod name) so a restarted worker can
+  # fail its own previous incarnation's executions immediately instead of waiting stale-after-ms.
+  worker:
+    id: ${APP_WORKER_ID:}
+    heartbeat-interval-ms: 10000
+    stale-after-ms: 60000
+    pending-republish-after-ms: 300000
+
 jwt:
   secret: ${JWT_SECRET}
   expiration: ${JWT_EXPIRATION}
