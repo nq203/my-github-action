@@ -12,6 +12,7 @@ import com.example.myGithubAction.workflow.dto.WorkFlowExecutionRequest;
 import com.example.myGithubAction.workflow.dto.WorkFlowExecutionResponse;
 import com.example.myGithubAction.workflow.dto.WorkFlowExecutionStepResponse;
 import com.example.myGithubAction.workflow.dto.ExecutionStatusUpdateRequest;
+import com.example.myGithubAction.workflow.service.ExecutionAccess;
 import com.example.myGithubAction.workflow.service.WorkFlowExecutionService;
 
 import java.util.List;
@@ -22,8 +23,11 @@ public class WorkFlowExecutionController {
 
     private final WorkFlowExecutionService executionService;
 
-    public WorkFlowExecutionController(WorkFlowExecutionService executionService) {
+    private final ExecutionAccess executionAccess;
+
+    public WorkFlowExecutionController(WorkFlowExecutionService executionService, ExecutionAccess executionAccess) {
         this.executionService = executionService;
+        this.executionAccess = executionAccess;
     }
 
     // ==================== EXECUTION ENDPOINTS ====================
@@ -61,7 +65,10 @@ public class WorkFlowExecutionController {
      * GET /api/workflow-executions/{id}
      */
     @GetMapping("/{id}")
-    public ResponseEntity<WorkFlowExecutionResponse> getExecution(@PathVariable Long id) {
+    public ResponseEntity<WorkFlowExecutionResponse> getExecution(
+            @AuthenticationPrincipal UserPrincipal userPrincipal,
+            @PathVariable Long id) {
+        executionAccess.requireOwner(id, userPrincipal.getUserId());
         WorkFlowExecutionResponse response = executionService.getExecution(id);
         return ResponseEntity.ok(response);
     }
@@ -135,7 +142,10 @@ public class WorkFlowExecutionController {
      * GET /api/workflow-executions/{id}/steps
      */
     @GetMapping("/{id}/steps")
-    public ResponseEntity<List<WorkFlowExecutionStepResponse>> getExecutionSteps(@PathVariable Long id) {
+    public ResponseEntity<List<WorkFlowExecutionStepResponse>> getExecutionSteps(
+            @AuthenticationPrincipal UserPrincipal userPrincipal,
+            @PathVariable Long id) {
+        executionAccess.requireOwner(id, userPrincipal.getUserId());
         List<WorkFlowExecutionStepResponse> response = executionService.getExecutionSteps(id);
         return ResponseEntity.ok(response);
     }
@@ -145,7 +155,10 @@ public class WorkFlowExecutionController {
      * GET /api/workflow-executions/steps/{stepId}
      */
     @GetMapping("/steps/{stepId}")
-    public ResponseEntity<WorkFlowExecutionStepResponse> getExecutionStep(@PathVariable Long stepId) {
+    public ResponseEntity<WorkFlowExecutionStepResponse> getExecutionStep(
+            @AuthenticationPrincipal UserPrincipal userPrincipal,
+            @PathVariable Long stepId) {
+        executionAccess.requireStepOwner(stepId, userPrincipal.getUserId());
         WorkFlowExecutionStepResponse response = executionService.getExecutionStep(stepId);
         return ResponseEntity.ok(response);
     }
