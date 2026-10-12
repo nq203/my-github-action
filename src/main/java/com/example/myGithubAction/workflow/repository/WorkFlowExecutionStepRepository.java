@@ -15,6 +15,8 @@ public interface WorkFlowExecutionStepRepository extends JpaRepository<WorkFlowE
     List<WorkFlowExecutionStep> findByExecutionId(Long executionId);
     List<WorkFlowExecutionStep> findByStatus(ExecutionState status);
     List<WorkFlowExecutionStep> findByExecutionIdOrderByStepOrder(Long executionId);
+    /** Steps of several executions in one query (live-monitor reconcile). */
+    List<WorkFlowExecutionStep> findByExecutionIdIn(Collection<Long> executionIds);
 
     // ==================== TARGETED UPDATES ====================
     // The engine never save()s a loaded step: that would overwrite columns

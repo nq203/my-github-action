@@ -64,6 +64,9 @@ public class ExecutionEventHub {
     }
 
     public int countForUser(Long userId) {
+        if (userId == null) {
+            return 0;
+        }
         int n = 0;
         for (CopyOnWriteArraySet<StreamSubscription> set : byExecution.values()) {
             for (StreamSubscription s : set) {

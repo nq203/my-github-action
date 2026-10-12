@@ -1,12 +1,15 @@
 package com.example.myGithubAction.config;
 
+import jakarta.servlet.DispatcherType;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.http.SessionCreationPolicy;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.http.HttpStatus;
 import org.springframework.security.web.SecurityFilterChain;
+import org.springframework.security.web.authentication.HttpStatusEntryPoint;
 import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
 import org.springframework.web.cors.CorsConfigurationSource;
 
@@ -41,6 +44,13 @@ public class SecurityConfig {
 
             // Configure authorization rules
             .authorizeHttpRequests(auth -> auth
+                // Async re-dispatch (e.g. SseEmitter completion) of a request that was already
+                // authorized on its REQUEST dispatch. The JWT filter (OncePerRequestFilter) does
+                // not run again on it, so without this it is denied on a committed response.
+                // Same for the ERROR dispatch to /error after a failed request: its real status
+                // (400, 500, ...) must not turn into 401. Only container-internal dispatches
+                // match; a direct GET /error is a REQUEST dispatch and still needs a token.
+                .dispatcherTypeMatchers(DispatcherType.ASYNC, DispatcherType.ERROR).permitAll()
                 // Public endpoints - no authentication required
                 .requestMatchers(
                     "/v3/api-docs/**",
@@ -58,6 +68,11 @@ public class SecurityConfig {
             // Set session management to STATELESS
             .sessionManagement(sess ->
                 sess.sessionCreationPolicy(SessionCreationPolicy.STATELESS)
+            )
+
+            // Missing/invalid token -> 401 (the default without a login mechanism is 403)
+            .exceptionHandling(ex -> ex
+                .authenticationEntryPoint(new HttpStatusEntryPoint(HttpStatus.UNAUTHORIZED))
             );
 
         // Register JWT filter before UsernamePasswordAuthenticationFilter

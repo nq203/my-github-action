@@ -112,6 +112,20 @@ public class StreamSubscription {
         }
     }
 
+    /**
+     * Sends a fresh snapshot (then {@code end} if terminal). Used when the sink had to drop
+     * events for a slow reader. No-op before {@link #start()} (the start snapshot covers it) or
+     * once closed.
+     */
+    public void resend() {
+        synchronized (lock) {
+            if (closed || !started) {
+                return;
+            }
+            resync();
+        }
+    }
+
     /** Applies a fresh DB state: forward status changes, a resync if lines are missing, then end if terminal. */
     public void reconcile(ExecutionSnapshot db) {
         synchronized (lock) {

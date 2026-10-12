@@ -1,13 +1,18 @@
 package com.example.myGithubAction.auth.exception;
 
+import com.example.myGithubAction.monitoring.TooManyStreamsException;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ControllerAdvice;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.context.request.WebRequest;
+import org.springframework.web.context.request.async.AsyncRequestNotUsableException;
+import org.springframework.web.util.DisconnectedClientHelper;
 
+import java.io.IOException;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -25,7 +30,22 @@ public class GlobalExceptionHandler {
                 .error("Resource Not Found")
                 .timestamp(System.currentTimeMillis())
                 .build();
-        return ResponseEntity.status(HttpStatus.NOT_FOUND).body(errorResponse);
+        // Explicit JSON: a client of the SSE endpoint sends Accept: text/event-stream, under which
+        // content negotiation would reject the error body and fall through to /error (-> 401).
+        return ResponseEntity.status(HttpStatus.NOT_FOUND).contentType(MediaType.APPLICATION_JSON).body(errorResponse);
+    }
+
+    @ExceptionHandler(TooManyStreamsException.class)
+    public ResponseEntity<ErrorResponse> handleTooManyStreams(TooManyStreamsException ex) {
+        log.warn("Stream rejected: {}", ex.getMessage());
+        ErrorResponse errorResponse = ErrorResponse.builder()
+                .status(HttpStatus.TOO_MANY_REQUESTS.value())
+                .message(ex.getMessage())
+                .error("Too Many Requests")
+                .timestamp(System.currentTimeMillis())
+                .build();
+        return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS).contentType(MediaType.APPLICATION_JSON)
+                .body(errorResponse);
     }
 
     @ExceptionHandler(BadRequestException.class)
@@ -57,6 +77,19 @@ public class GlobalExceptionHandler {
         response.put("errors", errors);
 
         return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(response);
+    }
+
+    /**
+     * A client that went away (e.g. closed an SSE stream) is not a server error and the response
+     * cannot be written anyway: log quietly and write nothing. Other I/O errors stay 500s.
+     */
+    @ExceptionHandler(IOException.class)
+    public ResponseEntity<ErrorResponse> handleIOException(IOException ex, WebRequest request) {
+        if (ex instanceof AsyncRequestNotUsableException || DisconnectedClientHelper.isClientDisconnectedException(ex)) {
+            log.debug("Client disconnected: {}", ex.getMessage());
+            return null;
+        }
+        return handleGlobalException(ex, request);
     }
 
     @ExceptionHandler(Exception.class)
