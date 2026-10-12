@@ -136,7 +136,7 @@ class ExecutionStateTransitionRepositoryTest {
         Long stepId = newStep(executionId, ExecutionState.PENDING);
 
         stepRepository.markRunning(stepId, LocalDateTime.now());
-        stepRepository.appendLog(stepId, "Executing: echo hi\n", LocalDateTime.now());
+        stepRepository.appendLogLines(stepId, "Executing: echo hi\n", 1, false, LocalDateTime.now());
         // Race #3: the old engine save()d a stale entity here and wiped the logs.
         stepRepository.transition(stepId, EnumSet.of(ExecutionState.RUNNING), ExecutionState.SUCCESS,
                 LocalDateTime.now(), 5L, null);
@@ -161,7 +161,7 @@ class ExecutionStateTransitionRepositoryTest {
             futures.add(pool.submit((Callable<Void>) () -> {
                 start.await();
                 for (int i = 0; i < linesPerThread; i++) {
-                    stepRepository.appendLog(stepId, "t" + tid + "-" + i + "\n", LocalDateTime.now());
+                    stepRepository.appendLogLines(stepId, "t" + tid + "-" + i + "\n", 1, false, LocalDateTime.now());
                 }
                 return null;
             }));

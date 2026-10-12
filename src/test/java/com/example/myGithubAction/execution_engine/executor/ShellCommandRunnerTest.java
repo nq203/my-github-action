@@ -6,6 +6,9 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
@@ -66,5 +69,97 @@ class ShellCommandRunnerTest {
 
         assertTrue(result.isSuccess());
         assertEquals(workspace.toRealPath().toString(), result.getOutput());
+    }
+
+    private List<String> runCollecting(String command, long id, StepExecutionResult[] out) {
+        ExecutionCancellationRegistry registry = new ExecutionCancellationRegistry();
+        ShellCommandRunner runner = new ShellCommandRunner(registry);
+        registry.register(id);
+        List<String> lines = Collections.synchronizedList(new ArrayList<>());
+        out[0] = runner.execute(command, 5000, id, workspace, lines::add);
+        return lines;
+    }
+
+    @Test
+    void callbackReceivesStdoutAndStderrInOrder() {
+        StepExecutionResult[] r = new StepExecutionResult[1];
+        List<String> lines = runCollecting("echo a; echo b >&2; echo c", 10L, r);
+
+        assertEquals(List.of("a", "b", "c"), lines);
+        assertEquals("a\nb\nc", r[0].getOutput());
+    }
+
+    @Test
+    void lastLineWithoutNewlineIsDelivered() {
+        StepExecutionResult[] r = new StepExecutionResult[1];
+        List<String> lines = runCollecting("printf x", 11L, r);
+
+        assertEquals(List.of("x"), lines);
+        assertEquals("x", r[0].getOutput());
+    }
+
+    @Test
+    void emptyOutputCommandCallsNoCallbackAndSucceeds() {
+        StepExecutionResult[] r = new StepExecutionResult[1];
+        List<String> lines = runCollecting("true", 12L, r);
+
+        assertTrue(lines.isEmpty());
+        assertTrue(r[0].isSuccess());
+    }
+
+    @Test
+    void linesArriveBeforeCommandEnds() {
+        ExecutionCancellationRegistry registry = new ExecutionCancellationRegistry();
+        ShellCommandRunner runner = new ShellCommandRunner(registry);
+        registry.register(13L);
+        long start = System.currentTimeMillis();
+        long[] firstAt = {-1};
+
+        runner.execute("echo first; sleep 1; echo second", 5000, 13L, workspace, line -> {
+            if (line.equals("first")) {
+                firstAt[0] = System.currentTimeMillis() - start;
+            }
+        });
+
+        assertTrue(firstAt[0] >= 0 && firstAt[0] < 800, "first line seen at " + firstAt[0] + "ms");
+    }
+
+    @Test
+    void burstAtTheEndIsFullyDeliveredThroughSlowStore() throws Exception {
+        com.example.myGithubAction.execution_engine.logging.StepLogStore store =
+            org.mockito.Mockito.mock(com.example.myGithubAction.execution_engine.logging.StepLogStore.class);
+        List<String> stored = Collections.synchronizedList(new ArrayList<>());
+        org.mockito.Mockito.when(store.append(org.mockito.ArgumentMatchers.anyLong(), org.mockito.ArgumentMatchers.anyList()))
+            .thenAnswer(inv -> {
+                Thread.sleep(50);
+                List<String> lines = new ArrayList<>(inv.<List<String>>getArgument(1));
+                stored.addAll(lines);
+                return java.util.Optional.of(
+                    new com.example.myGithubAction.execution_engine.logging.StepLogStore.Appended(1, lines));
+            });
+        com.example.myGithubAction.messaging.ExecutionEventPublisher publisher =
+            org.mockito.Mockito.mock(com.example.myGithubAction.messaging.ExecutionEventPublisher.class);
+        com.example.myGithubAction.execution_engine.logging.LogManager logManager =
+            new com.example.myGithubAction.execution_engine.logging.LogManager(store, publisher);
+        try {
+            ExecutionCancellationRegistry registry = new ExecutionCancellationRegistry();
+            ShellCommandRunner runner = new ShellCommandRunner(registry);
+            registry.register(14L);
+
+            StepExecutionResult result;
+            try (com.example.myGithubAction.execution_engine.logging.StepLogSink sink = logManager.openSink(5L)) {
+                result = runner.execute("for i in $(seq 1 3000); do echo line$i; done", 20000, 14L, workspace,
+                    sink::accept);
+            }
+
+            List<String> expected = new ArrayList<>();
+            for (int i = 1; i <= 3000; i++) {
+                expected.add("line" + i);
+            }
+            assertEquals(expected, new ArrayList<>(stored));
+            assertEquals(String.join("\n", expected), result.getOutput());
+        } finally {
+            logManager.shutdown();
+        }
     }
 }

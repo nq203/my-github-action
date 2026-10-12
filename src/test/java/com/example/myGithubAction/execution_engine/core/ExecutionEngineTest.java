@@ -193,4 +193,18 @@ class ExecutionEngineTest {
         verify(stepExecutor, never()).execute(any());
         verify(workspaceManager, never()).deleteWorkspace(executionId);
     }
+
+    @Test
+    void stepOutputIsNotAppendedAgainAfterStreaming() throws Exception {
+        Long executionId = 1L;
+        WorkFlowExecutionStep step = step(10L, executionId, 0);
+        when(stepRepository.findByExecutionIdOrderByStepOrder(executionId)).thenReturn(List.of(step));
+        when(stepExecutor.execute(any())).thenReturn(StepExecutionResult.builder()
+            .exitCode(0).output("streamed output").success(true).build());
+
+        engine.startExecution(executionId);
+
+        verify(stepExecutor).execute(any());
+        verify(logManager, never()).appendLog(eq(10L), eq("streamed output"));
+    }
 }

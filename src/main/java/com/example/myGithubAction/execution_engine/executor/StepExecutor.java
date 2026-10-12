@@ -7,6 +7,7 @@ import com.example.myGithubAction.workflow.repository.StepRepository;
 import com.example.myGithubAction.execution_engine.dto.StepExecutionResult;
 import com.example.myGithubAction.execution_engine.exception.StepExecutionException;
 import com.example.myGithubAction.execution_engine.logging.LogManager;
+import com.example.myGithubAction.execution_engine.logging.StepLogSink;
 import com.example.myGithubAction.execution_engine.executor.CommandValidator.CommandValidationException;
 import org.springframework.stereotype.Component;
 
@@ -78,12 +79,16 @@ public class StepExecutor {
                 throw new StepExecutionException("Command validation failed: " + e.getMessage(), e);
             }
 
-            // 4. Call commandRunner.execute()
-            StepExecutionResult result = commandRunner.execute(
-                command,
-                DEFAULT_TIMEOUT_MS,
-                step.getExecutionId(),
-                workspaceManager.resolveWorkspacePath(step.getExecutionId()));
+            // 4. Call commandRunner.execute(), streaming output lines into the step log
+            StepExecutionResult result;
+            try (StepLogSink sink = logManager.openSink(step.getId())) {
+                result = commandRunner.execute(
+                    command,
+                    DEFAULT_TIMEOUT_MS,
+                    step.getExecutionId(),
+                    workspaceManager.resolveWorkspacePath(step.getExecutionId()),
+                    sink::accept);
+            } // sink closed (flushed) here, before the result line is logged
 
             // 5. Log results
             if (result.isSuccess()) {

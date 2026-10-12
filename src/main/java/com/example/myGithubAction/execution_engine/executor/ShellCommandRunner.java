@@ -7,7 +7,7 @@ import java.io.BufferedReader;
 import java.io.*;
 import java.nio.file.Path;
 import java.util.concurrent.TimeUnit;
-import java.util.stream.Collectors;
+import java.util.function.Consumer;
 
 /**
  * Executes bash commands via ProcessBuilder.
@@ -22,6 +22,7 @@ import java.util.stream.Collectors;
 @Component
 public class ShellCommandRunner {
 
+    private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(ShellCommandRunner.class);
     private static final String SHELL = "/bin/bash";
     private static final String SHELL_FLAG = "-c";
     private static final long POLL_INTERVAL_MS = 300;
@@ -45,46 +46,50 @@ public class ShellCommandRunner {
      * @return execution result with output and status
      */
     public StepExecutionResult execute(String command, long timeoutMs, Long executionId, Path workingDirectory) {
+        return execute(command, timeoutMs, executionId, workingDirectory, line -> { });
+    }
+
+    /**
+     * Executes a bash command, handing every output line (stdout and stderr merged) to onLine as
+     * soon as it is read. The returned output is those lines joined with newlines.
+     */
+    public StepExecutionResult execute(String command, long timeoutMs, Long executionId, Path workingDirectory,
+                                       Consumer<String> onLine) {
         try {
             // 1. Create ProcessBuilder with [/bin/bash, -c, command]
             ProcessBuilder processBuilder = new ProcessBuilder(SHELL, SHELL_FLAG, command);
             processBuilder.directory(workingDirectory.toFile());
 
-            // 2. Keep stderr separate to capture both streams concurrently
-            processBuilder.redirectErrorStream(false);
+            // 2. Merge stderr into stdout so a single reader sees lines in order
+            processBuilder.redirectErrorStream(true);
 
             // 3. Start process
             Process process = processBuilder.start();
             cancellationRegistry.registerProcess(executionId, process);
 
-            // 4. Create synchronized buffer for output collection
-            StringBuilder stdoutBuffer = new StringBuilder();
-            StringBuilder stderrBuffer = new StringBuilder();
-
-            // 5. Start concurrent reader threads for stdout and stderr
-            Thread stdoutReader = new Thread(() -> {
-                try {
-                    String output = readOutput(process.getInputStream());
-                    synchronized (stdoutBuffer) {
-                        stdoutBuffer.append(output);
+            // 4. Single reader thread streams each line to the callback and collects the output
+            StringBuilder outputBuffer = new StringBuilder();
+            Thread reader = new Thread(() -> {
+                try (BufferedReader br = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
+                    String line;
+                    while ((line = br.readLine()) != null) {
+                        synchronized (outputBuffer) {
+                            if (outputBuffer.length() > 0) {
+                                outputBuffer.append('\n');
+                            }
+                            outputBuffer.append(line);
+                        }
+                        try {
+                            onLine.accept(line);
+                        } catch (RuntimeException ignored) {
+                            // a failing consumer must not stop the command's output collection
+                        }
                     }
-                } catch (java.io.IOException ignored) {
+                } catch (IOException ignored) {
                 }
             });
-            stdoutReader.setDaemon(true);
-            stdoutReader.start();
-
-            Thread stderrReader = new Thread(() -> {
-                try {
-                    String output = readOutput(process.getErrorStream());
-                    synchronized (stderrBuffer) {
-                        stderrBuffer.append(output);
-                    }
-                } catch (java.io.IOException ignored) {
-                }
-            });
-            stderrReader.setDaemon(true);
-            stderrReader.start();
+            reader.setDaemon(true);
+            reader.start();
 
             // 6. Wait with timeout, polling so cancellation can interrupt mid-run
             long deadline = System.currentTimeMillis() + timeoutMs;
@@ -124,18 +129,16 @@ public class ShellCommandRunner {
 
             cancellationRegistry.clearProcess(executionId);
 
-            // 8. Wait for reader threads to complete (with timeout)
-            stdoutReader.join(1000);
-            stderrReader.join(1000);
+            // 8. Wait for the reader thread to drain the stream (with timeout)
+            reader.join(1000);
+            if (reader.isAlive()) {
+                log.warn("Output reader still running after the command exited; the last output lines may be missing");
+            }
 
-            // 9. Combine output from both streams
-            String combinedOutput = stdoutBuffer.toString();
-            if (stderrBuffer.length() > 0) {
-                if (combinedOutput.length() > 0) {
-                    combinedOutput += "\n" + stderrBuffer.toString();
-                } else {
-                    combinedOutput = stderrBuffer.toString();
-                }
+            // 9. Output collected so far
+            String combinedOutput;
+            synchronized (outputBuffer) {
+                combinedOutput = outputBuffer.toString();
             }
 
             // 10. Return StepExecutionResult with exit code and output
@@ -153,27 +156,6 @@ public class ShellCommandRunner {
                 .errorMessage("Command execution failed: " + e.getMessage())
                 .success(false)
                 .build();
-        }
-    }
-
-    /**
-     * Reads output from input stream.
-     *
-     * Reads all lines and joins them.
-     *
-     * @param inputStream the input stream
-     * @return combined output string
-     * @throws java.io.IOException on read error
-     */
-    private String readOutput(InputStream inputStream) throws IOException {
-        // 1. Create BufferedReader with try-with-resources
-        try (BufferedReader reader = new BufferedReader(new InputStreamReader(inputStream))) {
-            // 2. Read all lines
-            // 3. Join with newline
-            String output = reader.lines().collect(Collectors.joining("\n"));
-
-            // 4. Return combined output
-            return output;
         }
     }
 }

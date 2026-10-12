@@ -41,12 +41,31 @@ public interface WorkFlowExecutionStepRepository extends JpaRepository<WorkFlowE
                    @Param("duration") Long duration,
                    @Param("errorMessage") String errorMessage);
 
-    /** Atomic append: concurrent appenders never lose each other's lines. */
+    /**
+     * Atomic append of already newline-terminated text plus the matching line count and truncation
+     * flag, in one UPDATE. Concurrent appenders never lose each other's lines.
+     */
     @Transactional
     @Modifying(clearAutomatically = true, flushAutomatically = true)
-    @Query("UPDATE WorkFlowExecutionStep s SET s.logs = CONCAT(COALESCE(s.logs, ''), :line), "
+    @Query("UPDATE WorkFlowExecutionStep s SET s.logs = CONCAT(COALESCE(s.logs, ''), :text), "
+            + "s.logLineCount = s.logLineCount + :addedLines, "
+            + "s.logTruncated = CASE WHEN :truncated = true THEN true ELSE s.logTruncated END, "
             + "s.updatedAt = :now WHERE s.id = :id")
-    int appendLog(@Param("id") Long id, @Param("line") String line, @Param("now") LocalDateTime now);
+    int appendLogLines(@Param("id") Long id, @Param("text") String text, @Param("addedLines") int addedLines,
+                       @Param("truncated") boolean truncated, @Param("now") LocalDateTime now);
+
+    /** Current log counters of a step (line count, stored chars, truncated flag). */
+    @Query("SELECT s.logLineCount AS lineCount, LENGTH(COALESCE(s.logs, '')) AS charCount, "
+            + "s.logTruncated AS truncated FROM WorkFlowExecutionStep s WHERE s.id = :id")
+    Optional<LogState> findLogState(@Param("id") Long id);
+
+    interface LogState {
+        Integer getLineCount();
+
+        Integer getCharCount();
+
+        Boolean getTruncated();
+    }
 
     @Transactional
     @Modifying(clearAutomatically = true, flushAutomatically = true)

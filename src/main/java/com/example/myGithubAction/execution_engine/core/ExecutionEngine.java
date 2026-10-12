@@ -188,10 +188,7 @@ public class ExecutionEngine {
                 // 2. Call StepExecutor.execute() using injected instance
                 StepExecutionResult result = this.stepExecutor.execute(step);
 
-                // 3. Capture logs
-                if (result.getOutput() != null && !result.getOutput().isEmpty()) {
-                    logManager.appendLog(stepId, result.getOutput());
-                }
+                // 3. Capture logs (command output was already streamed line by line by StepExecutor)
                 if (result.getErrorMessage() != null && !result.getErrorMessage().isEmpty()) {
                     logManager.appendLog(stepId, "[ERROR] " + result.getErrorMessage());
                 }

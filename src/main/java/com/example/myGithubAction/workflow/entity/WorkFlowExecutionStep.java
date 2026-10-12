@@ -5,6 +5,7 @@ import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
+import org.hibernate.annotations.ColumnDefault;
 import java.time.LocalDateTime;
 
 import com.example.myGithubAction.common.ExecutionState;
@@ -48,6 +49,18 @@ public class WorkFlowExecutionStep {
 
     @Column(columnDefinition = "TEXT")
     private String errorMessage;
+
+    /** Number of log lines stored so far; the next line gets seq logLineCount + 1. */
+    @Column(name = "log_line_count", nullable = false)
+    @ColumnDefault("0")
+    @Builder.Default
+    private int logLineCount = 0;
+
+    /** True once the per-step log cap was hit and the truncation marker stored. */
+    @Column(name = "log_truncated", nullable = false)
+    @ColumnDefault("false")
+    @Builder.Default
+    private boolean logTruncated = false;
 
     @Column
     private Long duration; // duration in milliseconds
