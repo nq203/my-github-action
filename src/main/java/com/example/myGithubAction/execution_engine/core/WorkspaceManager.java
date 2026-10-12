@@ -7,6 +7,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Comparator;
+import java.util.List;
 
 @Component
 public class WorkspaceManager {
@@ -45,6 +46,22 @@ public class WorkspaceManager {
                 }
             });
         } catch (IOException ignored) {
+        }
+    }
+
+    /** Ids of the executions that currently have a workspace directory on this host. */
+    public List<Long> listWorkspaceExecutionIds() {
+        if (!Files.isDirectory(baseDirectory)) {
+            return List.of();
+        }
+        try (var entries = Files.list(baseDirectory)) {
+            return entries
+                .map(path -> path.getFileName().toString())
+                .filter(name -> name.matches("exec-\\d+"))
+                .map(name -> Long.valueOf(name.substring("exec-".length())))
+                .toList();
+        } catch (IOException e) {
+            return List.of();
         }
     }
 }

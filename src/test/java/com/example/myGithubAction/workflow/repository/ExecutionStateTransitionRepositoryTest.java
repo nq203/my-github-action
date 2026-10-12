@@ -62,10 +62,13 @@ class ExecutionStateTransitionRepositoryTest {
     void claimPendingSucceedsOnceThenReturnsZero() {
         Long id = newExecution(ExecutionState.PENDING);
 
-        assertEquals(1, executionRepository.claimPending(id, LocalDateTime.now()));
-        assertEquals(0, executionRepository.claimPending(id, LocalDateTime.now()));
+        assertEquals(1, executionRepository.claimPending(id, "w1", LocalDateTime.now()));
+        assertEquals(0, executionRepository.claimPending(id, "w1", LocalDateTime.now()));
         assertEquals(ExecutionState.RUNNING, status(id));
-        assertNotNull(executionRepository.findById(id).orElseThrow().getStartedAt());
+        WorkFlowExecution claimed = executionRepository.findById(id).orElseThrow();
+        assertNotNull(claimed.getStartedAt());
+        assertEquals("w1", claimed.getWorkerId());
+        assertNotNull(claimed.getHeartbeatAt());
     }
 
     @Test
@@ -75,7 +78,7 @@ class ExecutionStateTransitionRepositoryTest {
         assertEquals(1, executionRepository.transition(
                 id, ExecutionState.CANCELLABLE, ExecutionState.CANCELLED, LocalDateTime.now(), null));
 
-        assertEquals(0, executionRepository.claimPending(id, LocalDateTime.now()));
+        assertEquals(0, executionRepository.claimPending(id, "w1", LocalDateTime.now()));
         assertEquals(ExecutionState.CANCELLED, status(id));
     }
 
@@ -113,7 +116,7 @@ class ExecutionStateTransitionRepositoryTest {
         for (int i = 0; i < workers; i++) {
             futures.add(pool.submit((Callable<Void>) () -> {
                 start.await();
-                winners.addAndGet(executionRepository.claimPending(id, LocalDateTime.now()));
+                winners.addAndGet(executionRepository.claimPending(id, "w1", LocalDateTime.now()));
                 return null;
             }));
         }

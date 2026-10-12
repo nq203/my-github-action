@@ -15,6 +15,7 @@ import java.time.LocalDateTime;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 
 /**
  * Main ExecutionEngine orchestrator.
@@ -44,6 +45,7 @@ public class ExecutionEngine {
     private final ErrorHandler errorHandler;
     private final ExecutionCancellationRegistry cancellationRegistry;
     private final WorkspaceManager workspaceManager;
+    private final WorkerIdentity workerIdentity;
 
     public ExecutionEngine(
             WorkFlowExecutionRepository workFlowExecutionRepository,
@@ -52,7 +54,8 @@ public class ExecutionEngine {
             LogManager logManager,
             ErrorHandler errorHandler,
             ExecutionCancellationRegistry cancellationRegistry,
-            WorkspaceManager workspaceManager) {
+            WorkspaceManager workspaceManager,
+            WorkerIdentity workerIdentity) {
         this.workFlowExecutionRepository = workFlowExecutionRepository;
         this.workFlowExecutionStepRepository = workFlowExecutionStepRepository;
         this.stepExecutor = stepExecutor;
@@ -60,36 +63,76 @@ public class ExecutionEngine {
         this.errorHandler = errorHandler;
         this.cancellationRegistry = cancellationRegistry;
         this.workspaceManager = workspaceManager;
+        this.workerIdentity = workerIdentity;
     }
 
     /**
-     * Starts execution of a workflow asynchronously.
+     * Claims an execution (atomic PENDING → RUNNING, owned by this worker).
      *
-     * Main entry point for workflow execution.
+     * Synchronous so a queue consumer can acknowledge its message only after it
+     * owns the execution. Returns false if the claim was lost: cancelled while
+     * PENDING, or already claimed (duplicate delivery / another worker).
+     *
+     * A won claim is registered immediately, so the heartbeat covers the execution
+     * even while it waits for a free executor thread.
+     */
+    public boolean claim(Long executionId) {
+        boolean claimed = workFlowExecutionRepository
+            .claimPending(executionId, workerIdentity.id(), LocalDateTime.now()) > 0;
+        if (claimed) {
+            cancellationRegistry.register(executionId);
+        }
+        return claimed;
+    }
+
+    /**
+     * Claims and runs an execution on the workflow executor (in-process dispatch).
+     *
      * Runs in a separate thread so the calling HTTP request
      * can return immediately with the execution ID.
-     *
-     * The execution is first claimed with an atomic PENDING → RUNNING update.
-     * If the claim affects 0 rows (cancelled while PENDING, already claimed by
-     * another worker, duplicate delivery) this call does nothing at all.
+     * If the claim affects 0 rows this call does nothing at all.
      *
      * @param executionId the execution ID from database
      */
     @Async("workflowExecutor")
     public void startExecution(Long executionId) {
-        cancellationRegistry.register(executionId);
+        if (!claim(executionId)) {
+            return;
+        }
+        try {
+            runClaimedExecution(executionId);
+        } finally {
+            cancellationRegistry.unregister(executionId);
+        }
+    }
+
+    /**
+     * Runs an execution this caller has already claimed via {@link #claim(Long)}.
+     *
+     * The returned future completes when the execution has finished, so the caller
+     * can release whatever capacity it reserved for it.
+     */
+    @Async("workflowExecutor")
+    public CompletableFuture<Void> runClaimed(Long executionId) {
+        try {
+            runClaimedExecution(executionId);
+            return CompletableFuture.completedFuture(null);
+        } finally {
+            cancellationRegistry.unregister(executionId);
+        }
+    }
+
+    /** Fails a claimed (RUNNING) execution that could not be run. No-op if it already finished or was cancelled. */
+    public void failClaimed(Long executionId, String message) {
+        LocalDateTime now = LocalDateTime.now();
+        workFlowExecutionRepository.transition(executionId, EXECUTION_RUNNING, ExecutionState.FAILED, now, message);
+        workFlowExecutionStepRepository.failRunningSteps(executionId, now, message);
+        cancellationRegistry.unregister(executionId);
+    }
+
+    private void runClaimedExecution(Long executionId) {
         boolean workspaceCreated = false;
         try {
-            if (cancellationRegistry.isCancelled(executionId)) {
-                // Cancelled before this async task even started; DB is already CANCELLED.
-                return;
-            }
-
-            // 1. Claim: PENDING → RUNNING (+ startedAt). Loses the race → nothing to do.
-            if (workFlowExecutionRepository.claimPending(executionId, LocalDateTime.now()) == 0) {
-                return;
-            }
-
             try {
                 workspaceManager.createWorkspace(executionId);
                 workspaceCreated = true;
@@ -98,10 +141,10 @@ public class ExecutionEngine {
                 return;
             }
 
-            // 2. Load steps in order
+            // Load steps in order
             List<WorkFlowExecutionStep> steps = workFlowExecutionStepRepository.findByExecutionIdOrderByStepOrder(executionId);
 
-            // 3. Execute each step sequentially, stopping on cancel or failure
+            // Execute each step sequentially, stopping on cancel or failure
             for (WorkFlowExecutionStep step : steps) {
                 if (cancellationRegistry.isCancelled(executionId)) {
                     // DB status is already CANCELLED (set by cancelExecution) - nothing to write
@@ -115,13 +158,11 @@ public class ExecutionEngine {
                 }
             }
 
-            // 4. Handle completion
             handleCompletion(executionId);
         } finally {
             if (workspaceCreated) {
                 workspaceManager.deleteWorkspace(executionId);
             }
-            cancellationRegistry.unregister(executionId);
         }
     }
 

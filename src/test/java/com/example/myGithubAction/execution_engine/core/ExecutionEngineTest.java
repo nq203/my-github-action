@@ -45,10 +45,10 @@ class ExecutionEngineTest {
             .when(workspaceManager).createWorkspace(anyLong());
         engine = new ExecutionEngine(
             executionRepository, stepRepository, stepExecutor, logManager,
-            errorHandler, cancellationRegistry, workspaceManager);
+            errorHandler, cancellationRegistry, workspaceManager, new WorkerIdentity("worker-test"));
 
         // Default: this worker wins the claim and every transition applies.
-        when(executionRepository.claimPending(anyLong(), any())).thenReturn(1);
+        when(executionRepository.claimPending(anyLong(), eq("worker-test"), any())).thenReturn(1);
         when(executionRepository.transition(anyLong(), any(), any(), any(), any())).thenReturn(1);
         when(stepRepository.transition(anyLong(), any(), any(), any(), any(), any())).thenReturn(1);
         when(stepRepository.markRunning(anyLong(), any())).thenReturn(1);
@@ -131,31 +131,46 @@ class ExecutionEngineTest {
     }
 
     @Test
-    void cancellationStopsRemainingStepsAndDoesNotTouchStatus() throws Exception {
+    void executionCancelledAfterClaimStopsBeforeRunningAnyStep() throws Exception {
         Long executionId = 3L;
         WorkFlowExecutionStep step1 = step(30L, executionId, 0);
-        WorkFlowExecutionStep step2 = step(31L, executionId, 1);
+        when(stepRepository.findByExecutionIdOrderByStepOrder(executionId)).thenReturn(List.of(step1));
 
-        when(stepRepository.findByExecutionIdOrderByStepOrder(executionId))
-            .thenReturn(List.of(step1, step2));
-
-        cancellationRegistry.register(executionId);
+        // Claimed by the queue listener, then cancelled while waiting for an executor thread.
+        assertTrue(engine.claim(executionId));
         cancellationRegistry.cancel(executionId);
 
-        assertTimeoutPreemptively(ofSeconds(5), () -> engine.startExecution(executionId));
+        assertTimeoutPreemptively(ofSeconds(5), () -> engine.runClaimed(executionId).join());
 
-        verify(executionRepository, never()).claimPending(anyLong(), any());
-        verify(executionRepository, never()).transition(anyLong(), any(), any(), any(), any());
         verify(stepExecutor, never()).execute(any());
-        verify(workspaceManager, never()).createWorkspace(executionId);
-        verify(workspaceManager, never()).deleteWorkspace(executionId);
+        verify(executionRepository, never()).transition(anyLong(), any(), any(), any(), any());
+        assertTrue(cancellationRegistry.activeExecutionIds().isEmpty(), "must unregister when done");
+    }
+
+    @Test
+    void claimRecordsOwnerAndRegistersTheExecutionForHeartbeat() {
+        assertTrue(engine.claim(8L));
+
+        verify(executionRepository).claimPending(eq(8L), eq("worker-test"), any());
+        assertTrue(cancellationRegistry.activeExecutionIds().contains(8L));
+    }
+
+    @Test
+    void failClaimedFailsExecutionAndItsRunningStepsAndUnregisters() {
+        assertTrue(engine.claim(9L));
+
+        engine.failClaimed(9L, "boom");
+
+        verify(executionRepository).transition(eq(9L), any(), eq(ExecutionState.FAILED), any(), eq("boom"));
+        verify(stepRepository).failRunningSteps(eq(9L), any(), eq("boom"));
+        assertFalse(cancellationRegistry.activeExecutionIds().contains(9L));
     }
 
     @Test
     void lostClaimDoesNothing() throws Exception {
         Long executionId = 5L;
         // Cancelled while PENDING in the DB, or already claimed by another worker.
-        when(executionRepository.claimPending(eq(executionId), any())).thenReturn(0);
+        when(executionRepository.claimPending(eq(executionId), any(), any())).thenReturn(0);
 
         assertTimeoutPreemptively(ofSeconds(5), () -> engine.startExecution(executionId));
 

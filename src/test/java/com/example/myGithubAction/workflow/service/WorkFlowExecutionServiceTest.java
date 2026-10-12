@@ -2,8 +2,7 @@ package com.example.myGithubAction.workflow.service;
 
 import com.example.myGithubAction.auth.exception.BadRequestException;
 import com.example.myGithubAction.common.ExecutionState;
-import com.example.myGithubAction.execution_engine.core.ExecutionCancellationRegistry;
-import com.example.myGithubAction.execution_engine.core.ExecutionEngine;
+import com.example.myGithubAction.messaging.ExecutionDispatcher;
 import com.example.myGithubAction.workflow.dto.ExecutionStatusUpdateRequest;
 import com.example.myGithubAction.workflow.dto.WorkFlowExecutionRequest;
 import com.example.myGithubAction.workflow.entity.WorkFlow;
@@ -15,6 +14,7 @@ import com.example.myGithubAction.workflow.repository.WorkFlowRepository;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.util.EnumSet;
@@ -31,8 +31,7 @@ class WorkFlowExecutionServiceTest {
     private WorkFlowExecutionStepRepository executionStepRepository;
     private WorkFlowRepository workflowRepository;
     private StepRepository stepRepository;
-    private ExecutionEngine executionEngine;
-    private ExecutionCancellationRegistry cancellationRegistry;
+    private ExecutionDispatcher executionDispatcher;
     private WorkFlowExecutionService service;
 
     @BeforeEach
@@ -41,12 +40,11 @@ class WorkFlowExecutionServiceTest {
         executionStepRepository = mock(WorkFlowExecutionStepRepository.class);
         workflowRepository = mock(WorkFlowRepository.class);
         stepRepository = mock(StepRepository.class);
-        executionEngine = mock(ExecutionEngine.class);
-        cancellationRegistry = new ExecutionCancellationRegistry();
+        executionDispatcher = mock(ExecutionDispatcher.class);
 
         service = new WorkFlowExecutionService(
             executionRepository, executionStepRepository, workflowRepository,
-            stepRepository, executionEngine, cancellationRegistry);
+            stepRepository, executionDispatcher, mock(PlatformTransactionManager.class));
 
         TransactionSynchronizationManager.initSynchronization();
     }
@@ -67,7 +65,7 @@ class WorkFlowExecutionServiceTest {
             .id(5L).workflowId(1L).userId(2L).status(ExecutionState.PENDING).build();
         when(executionRepository.save(any(WorkFlowExecution.class))).thenReturn(savedExecution);
 
-        doThrow(new RejectedExecutionException("pool full")).when(executionEngine).startExecution(5L);
+        doThrow(new RejectedExecutionException("pool full")).when(executionDispatcher).dispatch(5L);
 
         WorkFlowExecutionRequest request = new WorkFlowExecutionRequest();
         request.setWorkflowId(1L);
@@ -78,7 +76,26 @@ class WorkFlowExecutionServiceTest {
         TransactionSynchronizationManager.getSynchronizations().forEach(sync -> sync.afterCommit());
 
         verify(executionRepository).transition(eq(5L), eq(EnumSet.of(ExecutionState.PENDING)),
-            eq(ExecutionState.FAILED), any(), contains("rejected"));
+            eq(ExecutionState.FAILED), any(), contains("pool full"));
+        verify(executionRepository, never()).markDispatched(anyLong(), any());
+    }
+
+    @Test
+    void dispatchesOnlyAfterCommit() {
+        when(workflowRepository.findById(1L)).thenReturn(Optional.of(WorkFlow.builder().id(1L).build()));
+        when(stepRepository.findByWorkflowId(1L)).thenReturn(new java.util.ArrayList<>());
+        when(executionRepository.save(any(WorkFlowExecution.class))).thenReturn(
+            WorkFlowExecution.builder().id(6L).workflowId(1L).userId(2L).status(ExecutionState.PENDING).build());
+        WorkFlowExecutionRequest request = new WorkFlowExecutionRequest();
+        request.setWorkflowId(1L);
+
+        service.createExecution(2L, request);
+
+        verify(executionDispatcher, never()).dispatch(anyLong());
+        TransactionSynchronizationManager.getSynchronizations().forEach(sync -> sync.afterCommit());
+        verify(executionDispatcher).dispatch(6L);
+        verify(executionRepository).markDispatched(eq(6L), any());
+        verify(executionRepository, never()).transition(anyLong(), any(), any(), any(), any());
     }
 
     // ---------- cancel / status / delete race guards ----------
@@ -104,9 +121,9 @@ class WorkFlowExecutionServiceTest {
 
         service.cancelExecution(7L);
 
-        assertFalse(cancellationRegistry.isCancelled(7L), "must not signal before CANCELLED is committed");
+        verify(executionDispatcher, never()).requestCancel(anyLong());
         commit();
-        assertTrue(cancellationRegistry.isCancelled(7L));
+        verify(executionDispatcher).requestCancel(7L);
     }
 
     @Test
@@ -118,7 +135,7 @@ class WorkFlowExecutionServiceTest {
         commit();
 
         assertEquals("SUCCESS", response.getStatus());
-        assertFalse(cancellationRegistry.isCancelled(8L));
+        verify(executionDispatcher, never()).requestCancel(anyLong());
     }
 
     @Test
@@ -129,7 +146,7 @@ class WorkFlowExecutionServiceTest {
 
         assertThrows(BadRequestException.class, () -> service.updateExecutionStatus(9L, request));
         verify(executionRepository, never()).transition(anyLong(), any(), any(), any(), any());
-        verify(executionRepository, never()).claimPending(anyLong(), any());
+        verify(executionRepository, never()).claimPending(anyLong(), any(), any());
     }
 
     @Test

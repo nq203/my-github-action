@@ -1,7 +1,11 @@
 package com.example.myGithubAction.workflow.service;
 
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
@@ -17,36 +21,39 @@ import com.example.myGithubAction.workflow.repository.WorkFlowRepository;
 import com.example.myGithubAction.workflow.repository.StepRepository;
 import com.example.myGithubAction.workflow.repository.WorkFlowExecutionRepository;
 import com.example.myGithubAction.workflow.repository.WorkFlowExecutionStepRepository;
-import com.example.myGithubAction.execution_engine.core.ExecutionEngine;
-import com.example.myGithubAction.execution_engine.core.ExecutionCancellationRegistry;
+import com.example.myGithubAction.messaging.ExecutionDispatcher;
 
 import java.time.LocalDateTime;
 import java.util.*;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.stream.Collectors;
 
+@Slf4j
 @Service
 public class WorkFlowExecutionService {
     private final WorkFlowExecutionRepository executionRepository;
     private final WorkFlowExecutionStepRepository executionStepRepository;
     private final WorkFlowRepository workflowRepository;
     private final StepRepository stepRepository;
-    private final ExecutionEngine executionEngine;
-    private final ExecutionCancellationRegistry cancellationRegistry;
+    private final ExecutionDispatcher executionDispatcher;
+    private final TransactionTemplate newTransaction;
 
     public WorkFlowExecutionService(
             WorkFlowExecutionRepository executionRepository,
             WorkFlowExecutionStepRepository executionStepRepository,
             WorkFlowRepository workflowRepository,
             StepRepository stepRepository,
-            ExecutionEngine executionEngine,
-            ExecutionCancellationRegistry cancellationRegistry) {
+            ExecutionDispatcher executionDispatcher,
+            PlatformTransactionManager transactionManager) {
         this.executionRepository = executionRepository;
         this.executionStepRepository = executionStepRepository;
         this.workflowRepository = workflowRepository;
         this.stepRepository = stepRepository;
-        this.executionEngine = executionEngine;
-        this.cancellationRegistry = cancellationRegistry;
+        this.executionDispatcher = executionDispatcher;
+        // In afterCommit the outer transaction is already committed but still bound to the thread,
+        // so plain @Transactional calls fail with "no transaction is in progress": use a new one.
+        this.newTransaction = new TransactionTemplate(transactionManager);
+        this.newTransaction.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
     }
 
     // ==================== WORKFLOW EXECUTION METHODS ====================
@@ -58,9 +65,10 @@ public class WorkFlowExecutionService {
      * 1. Validates the workflow exists
      * 2. Creates a WorkFlowExecution record in PENDING status
      * 3. Creates WorkFlowExecutionStep records for each step
-     * 4. After transaction commits, triggers ExecutionEngine asynchronously
+     * 4. After transaction commits, dispatches the execution (Kafka queue, or the
+     *    in-process executor when Kafka is disabled)
      *
-     * The startExecution call is deferred to after-commit so the
+     * The dispatch is deferred to after-commit so the
      * ExecutionEngine always sees the persisted execution and steps.
      *
      * @param userId the user ID who triggered the execution
@@ -91,24 +99,34 @@ public class WorkFlowExecutionService {
             WorkFlowExecutionStep executionStep = WorkFlowExecutionStep.builder()
                     .executionId(savedExecution.getId())
                     .stepId(step.getId())
+                    // Snapshot of the command at trigger time (the column is NOT NULL)
+                    .command(Objects.toString(step.getCommand(), ""))
                     .status(ExecutionState.PENDING)
                     .stepOrder(step.getStepOrder())
                     .build();
             executionStepRepository.save(executionStep);
         }
 
-        // Trigger ExecutionEngine AFTER the transaction commits.
+        // Dispatch AFTER the transaction commits.
         // This guarantees the execution and steps are visible when
-        // the async engine reads them from the database.
+        // the engine reads them from the database.
         final Long executionId = savedExecution.getId();
         TransactionSynchronizationManager.registerSynchronization(
             new TransactionSynchronization() {
                 @Override
                 public void afterCommit() {
                     try {
-                        executionEngine.startExecution(executionId);
+                        executionDispatcher.dispatch(executionId);
                     } catch (RejectedExecutionException e) {
-                        markExecutionRejected(executionId);
+                        markExecutionRejected(executionId, e.getMessage());
+                        return;
+                    }
+                    try {
+                        // Lets the sweeper tell a freshly queued execution from a lost one
+                        newTransaction.executeWithoutResult(status ->
+                                executionRepository.markDispatched(executionId, LocalDateTime.now()));
+                    } catch (RuntimeException e) {
+                        log.warn("Could not record dispatch time of execution {}", executionId, e);
                     }
                 }
             }
@@ -118,16 +136,17 @@ public class WorkFlowExecutionService {
     }
 
     /**
-     * Marks an execution FAILED when the workflow executor's thread pool
-     * and queue are both full, so a rejected submission doesn't leave the
-     * execution silently stuck PENDING forever.
+     * Marks an execution FAILED when it could not be handed over for execution
+     * (executor full, or the Kafka broker did not acknowledge it), so a rejected
+     * dispatch doesn't leave the execution silently stuck PENDING forever.
      *
-     * @param executionId the execution that could not be submitted
+     * @param executionId the execution that could not be dispatched
+     * @param reason why the dispatcher rejected it
      */
-    private void markExecutionRejected(Long executionId) {
-        executionRepository.transition(
+    private void markExecutionRejected(Long executionId, String reason) {
+        newTransaction.executeWithoutResult(status -> executionRepository.transition(
                 executionId, EnumSet.of(ExecutionState.PENDING), ExecutionState.FAILED,
-                LocalDateTime.now(), "Execution rejected: thread pool and queue are full");
+                LocalDateTime.now(), "Execution rejected: " + reason));
     }
 
     /**
@@ -189,7 +208,8 @@ public class WorkFlowExecutionService {
 
         LocalDateTime now = LocalDateTime.now();
         int updated = ExecutionState.RUNNING.equals(target)
-                ? executionRepository.claimPending(executionId, now)
+                // Manual override: no worker owns it, so it is reaped after the heartbeat timeout
+                ? executionRepository.claimPending(executionId, null, now)
                 : executionRepository.transition(
                         executionId, EnumSet.of(current), target, now, request.getErrorMessage());
         if (updated == 0) {
@@ -217,9 +237,9 @@ public class WorkFlowExecutionService {
         int updated = executionRepository.transition(
                 executionId, ExecutionState.CANCELLABLE, ExecutionState.CANCELLED, LocalDateTime.now(), null);
         if (updated > 0) {
-            // Signal the in-memory registry only once CANCELLED is committed, so the engine
-            // never observes the flag before the DB state.
-            runAfterCommit(() -> cancellationRegistry.cancel(executionId));
+            // Signal workers only once CANCELLED is committed, so they never observe the
+            // signal before the DB state.
+            runAfterCommit(() -> executionDispatcher.requestCancel(executionId));
         }
         return getExecution(executionId);
     }

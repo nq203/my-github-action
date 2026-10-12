@@ -3,6 +3,7 @@ package com.example.myGithubAction.workflow.repository;
 import com.example.myGithubAction.common.ExecutionState;
 import com.example.myGithubAction.workflow.entity.WorkFlowExecution;
 import jakarta.persistence.LockModeType;
+import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Modifying;
@@ -35,13 +36,13 @@ public interface WorkFlowExecutionRepository extends JpaRepository<WorkFlowExecu
     // Each method returns the number of rows updated: 0 means the execution was
     // not in an expected state (lost the race) and nothing was changed.
 
-    /** PENDING → RUNNING. Only the caller that gets 1 owns the execution. */
+    /** PENDING → RUNNING, owned by {@code workerId}. Only the caller that gets 1 owns the execution. */
     @Transactional
     @Modifying(clearAutomatically = true, flushAutomatically = true)
     @Query("UPDATE WorkFlowExecution e SET e.status = com.example.myGithubAction.common.ExecutionState.RUNNING, "
-            + "e.startedAt = :now, e.updatedAt = :now "
+            + "e.startedAt = :now, e.heartbeatAt = :now, e.workerId = :workerId, e.updatedAt = :now "
             + "WHERE e.id = :id AND e.status = com.example.myGithubAction.common.ExecutionState.PENDING")
-    int claimPending(@Param("id") Long id, @Param("now") LocalDateTime now);
+    int claimPending(@Param("id") Long id, @Param("workerId") String workerId, @Param("now") LocalDateTime now);
 
     /** Moves an execution to {@code to} only if it is currently in one of the {@code from} states. */
     @Transactional
@@ -64,4 +65,64 @@ public interface WorkFlowExecutionRepository extends JpaRepository<WorkFlowExecu
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     @Query("SELECT e FROM WorkFlowExecution e WHERE e.id = :id")
     Optional<WorkFlowExecution> findByIdForUpdate(@Param("id") Long id);
+
+    // ==================== LIVENESS (heartbeat / reaper / sweeper) ====================
+
+    /** Renews the heartbeat of the given executions that are still RUNNING under {@code workerId}. */
+    @Transactional
+    @Modifying(clearAutomatically = true, flushAutomatically = true)
+    @Query("UPDATE WorkFlowExecution e SET e.heartbeatAt = :now "
+            + "WHERE e.id IN :ids AND e.workerId = :workerId "
+            + "AND e.status = com.example.myGithubAction.common.ExecutionState.RUNNING")
+    int heartbeat(@Param("ids") Collection<Long> ids, @Param("workerId") String workerId,
+                  @Param("now") LocalDateTime now);
+
+    /** Which of {@code ids} are still RUNNING under {@code workerId}. */
+    @Query("SELECT e.id FROM WorkFlowExecution e WHERE e.id IN :ids AND e.workerId = :workerId "
+            + "AND e.status = com.example.myGithubAction.common.ExecutionState.RUNNING")
+    List<Long> findOwnedRunningIds(@Param("ids") Collection<Long> ids, @Param("workerId") String workerId);
+
+    @Query("SELECT e.id FROM WorkFlowExecution e WHERE e.workerId = :workerId "
+            + "AND e.status = com.example.myGithubAction.common.ExecutionState.RUNNING")
+    List<Long> findRunningIdsByWorker(@Param("workerId") String workerId);
+
+    /** RUNNING executions whose last sign of life (heartbeat, else start) is older than {@code cutoff}. */
+    @Query("SELECT e.id FROM WorkFlowExecution e "
+            + "WHERE e.status = com.example.myGithubAction.common.ExecutionState.RUNNING "
+            + "AND COALESCE(e.heartbeatAt, e.startedAt) < :cutoff")
+    List<Long> findStaleRunningIds(@Param("cutoff") LocalDateTime cutoff);
+
+    /** RUNNING → FAILED, but only if it is still stale at the moment of the update (a late heartbeat wins). */
+    @Transactional
+    @Modifying(clearAutomatically = true, flushAutomatically = true)
+    @Query("UPDATE WorkFlowExecution e SET e.status = com.example.myGithubAction.common.ExecutionState.FAILED, "
+            + "e.endedAt = :now, e.errorMessage = :message, e.updatedAt = :now "
+            + "WHERE e.id = :id AND e.status = com.example.myGithubAction.common.ExecutionState.RUNNING "
+            + "AND COALESCE(e.heartbeatAt, e.startedAt) < :cutoff")
+    int failIfStale(@Param("id") Long id, @Param("cutoff") LocalDateTime cutoff,
+                    @Param("now") LocalDateTime now, @Param("message") String message);
+
+    /** PENDING executions whose START was last published (or created) before {@code cutoff}. */
+    @Query("SELECT e.id FROM WorkFlowExecution e "
+            + "WHERE e.status = com.example.myGithubAction.common.ExecutionState.PENDING "
+            + "AND COALESCE(e.lastDispatchedAt, e.createdAt) < :cutoff ORDER BY e.id")
+    List<Long> findStalePendingIds(@Param("cutoff") LocalDateTime cutoff, Pageable pageable);
+
+    /** Records that a START was published. Only while PENDING. */
+    @Transactional
+    @Modifying(clearAutomatically = true, flushAutomatically = true)
+    @Query("UPDATE WorkFlowExecution e SET e.lastDispatchedAt = :now "
+            + "WHERE e.id = :id AND e.status = com.example.myGithubAction.common.ExecutionState.PENDING")
+    int markDispatched(@Param("id") Long id, @Param("now") LocalDateTime now);
+
+    /**
+     * Wins the right to re-publish a stale PENDING execution: of several sweepers, exactly one
+     * gets 1 and re-publishes, so a backlog is not amplified by the number of workers.
+     */
+    @Transactional
+    @Modifying(clearAutomatically = true, flushAutomatically = true)
+    @Query("UPDATE WorkFlowExecution e SET e.lastDispatchedAt = :now "
+            + "WHERE e.id = :id AND e.status = com.example.myGithubAction.common.ExecutionState.PENDING "
+            + "AND COALESCE(e.lastDispatchedAt, e.createdAt) < :cutoff")
+    int claimRedispatch(@Param("id") Long id, @Param("cutoff") LocalDateTime cutoff, @Param("now") LocalDateTime now);
 }

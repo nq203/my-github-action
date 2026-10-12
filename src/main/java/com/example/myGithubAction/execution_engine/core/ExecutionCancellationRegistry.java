@@ -3,6 +3,7 @@ package com.example.myGithubAction.execution_engine.core;
 import org.springframework.stereotype.Component;
 
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -11,7 +12,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * shell process for each workflow execution.
  *
  * State is not persisted: if the application restarts, all registrations
- * are lost (acceptable known limitation for this fix).
+ * are lost; recovery marks the interrupted executions FAILED.
  */
 @Component
 public class ExecutionCancellationRegistry {
@@ -36,20 +37,29 @@ public class ExecutionCancellationRegistry {
         return flag != null && flag.get();
     }
 
+    /**
+     * Flags a locally running execution as cancelled and kills its process.
+     *
+     * No-op for executions this instance is not running: the DB status is the source
+     * of truth (an execution cancelled before being claimed can never be claimed),
+     * and remembering unknown ids would leak entries, since every worker receives
+     * every broadcast cancel.
+     */
     public void cancel(Long executionId) {
         AtomicBoolean flag = cancelledFlags.get(executionId);
         if (flag != null) {
             flag.set(true);
-        } else {
-            // Execution might not be registered yet (not started) or registry was
-            // created after startExecution already ran; still record the intent.
-            cancelledFlags.put(executionId, new AtomicBoolean(true));
         }
 
         Process process = runningProcesses.get(executionId);
         if (process != null && process.isAlive()) {
             process.destroyForcibly();
         }
+    }
+
+    /** Ids of the executions currently running on this instance. */
+    public Set<Long> activeExecutionIds() {
+        return Set.copyOf(cancelledFlags.keySet());
     }
 
     public void registerProcess(Long executionId, Process process) {
