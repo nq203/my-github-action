@@ -45,6 +45,9 @@ app:
       enabled: ${APP_KAFKA_CONSUMER_ENABLED:true}
     worker:
       max-concurrent-executions: ${EXECUTION_MAX_CONCURRENT:4}
+  # Dev pages under /dev/** (live execution monitor). Never enable in production.
+  dev-ui:
+    enabled: ${APP_DEV_UI_ENABLED:false}
   # Liveness of an instance that runs executions (heartbeat, reaper, sweeper).
   # Set id to something stable across restarts (e.g. the pod name) so a restarted worker can
   # fail its own previous incarnation's executions immediately instead of waiting stale-after-ms.

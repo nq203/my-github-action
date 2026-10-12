@@ -1,0 +1,340 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>execution-monitor (dev)</title>
+<style>
+  body { font-family: sans-serif; margin: 1rem; max-width: 60rem; }
+  fieldset { margin-bottom: 1rem; }
+  input { margin: 0 .5rem .25rem 0; }
+  #token { width: 32rem; }
+  #error { color: #b00020; font-weight: bold; min-height: 1.2em; }
+  .step { border: 1px solid #ccc; border-radius: 4px; padding: .5rem; margin-bottom: .75rem; }
+  .badge { display: inline-block; padding: 0 .5rem; border-radius: 3px; color: #fff; background: #777; font-size: .85em; }
+  .badge.RUNNING { background: #1565c0; }
+  .badge.SUCCESS, .badge.COMPLETED { background: #2e7d32; }
+  .badge.FAILED, .badge.CANCELLED { background: #c62828; }
+  pre.log { background: #111; color: #ddd; padding: .5rem; margin: .5rem 0 0; height: 12rem; overflow: auto; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<h1>Execution monitor (dev tool)</h1>
+
+<fieldset>
+  <legend>Login (optional, fills the token)</legend>
+  <input id="login-username" placeholder="username" autocomplete="username">
+  <input id="login-password" type="password" placeholder="password" autocomplete="current-password">
+  <button id="login" type="button">Get token</button>
+</fieldset>
+
+<div>
+  <input id="token" placeholder="JWT (Bearer token)">
+  <input id="execution-id" placeholder="execution id" size="10">
+  <button id="connect" type="button">Connect</button>
+</div>
+
+<p>Execution status: <span id="execution-status" class="badge">-</span>
+   <span id="connection"></span></p>
+<div id="error"></div>
+<div id="steps"></div>
+
+<script>
+'use strict';
+
+// ---------------------------------------------------------------------------
+// Pure logic (no DOM): SSE frame parser and state reducer.
+// Stream contract: events snapshot | execution | step | log | end, JSON data.
+//   snapshot  {execution:{id,workflowId,status,startedAt,endedAt,errorMessage},
+//              steps:[{id,order,command,status,startedAt,endedAt,duration,errorMessage,logs,lineCount}]}
+//             (logs = whole text, one "\n" after every line; lineCount = number of lines)
+//   execution {status,startedAt,endedAt,errorMessage}
+//   step      {stepId,status,startedAt,endedAt,duration,errorMessage}
+//   log       {stepId,fromSeq,lines[]}   fromSeq is 1-based: lines[0] is line number fromSeq
+//   end       {status}
+// ---------------------------------------------------------------------------
+
+/** Incremental SSE parser. feed(text) returns the complete frames {event,data} seen so far. */
+function createSseParser() {
+  let buffer = '';
+  return {
+    feed(text) {
+      buffer += text;
+      const frames = [];
+      // Frames end with a blank line; normalise CRLF/CR first. A trailing lone CR may be the first
+      // half of a CRLF split across chunks, so keep it in the buffer until the next chunk.
+      let normalised = buffer.replace(/\r\n/g, '\n');
+      let carry = '';
+      if (normalised.endsWith('\r')) {
+        carry = '\r';
+        normalised = normalised.slice(0, -1);
+      }
+      normalised = normalised.replace(/\r/g, '\n');
+      const parts = normalised.split('\n\n');
+      buffer = parts.pop() + carry; // the last part is an unfinished frame (or '')
+      for (const part of parts) {
+        const frame = parseFrame(part);
+        if (frame) {
+          frames.push(frame);
+        }
+      }
+      return frames;
+    }
+  };
+}
+
+function parseFrame(text) {
+  let event = 'message';
+  const data = [];
+  for (const line of text.split('\n')) {
+    if (line === '' || line.startsWith(':')) {
+      continue; // comment (": keepalive") or empty
+    }
+    const colon = line.indexOf(':');
+    const field = colon < 0 ? line : line.slice(0, colon);
+    let value = colon < 0 ? '' : line.slice(colon + 1);
+    if (value.startsWith(' ')) {
+      value = value.slice(1);
+    }
+    if (field === 'event') {
+      event = value;
+    } else if (field === 'data') {
+      data.push(value);
+    }
+  }
+  if (data.length === 0 && event === 'message') {
+    return null; // only comments
+  }
+  return { event, data: data.join('\n') };
+}
+
+function newState() {
+  return { execution: { status: null }, steps: [], ended: false, endStatus: null, needReconnect: false };
+}
+
+function findStep(state, id) {
+  return state.steps.find(s => s.id === id);
+}
+
+/**
+ * Applies one parsed event ({event, data: object}) to the state, in place.
+ * A log gap (fromSeq beyond the next expected line) sets state.needReconnect: the caller drops the
+ * connection and reconnects, which yields a fresh snapshot. Lines already seen are skipped.
+ */
+function applyEvent(state, event, d) {
+  switch (event) {
+    case 'snapshot':
+      state.execution = Object.assign({}, d.execution);
+      state.steps = (d.steps || []).map(s => Object.assign({}, s, {
+        logs: s.logs || '',
+        nextSeq: (s.lineCount || 0) + 1 // next expected 1-based line number
+      }));
+      state.needReconnect = false;
+      break;
+    case 'execution':
+      Object.assign(state.execution, d);
+      break;
+    case 'step': {
+      const s = findStep(state, d.stepId);
+      if (!s) { state.needReconnect = true; break; }
+      s.status = d.status;
+      s.startedAt = d.startedAt;
+      s.endedAt = d.endedAt;
+      s.duration = d.duration;
+      s.errorMessage = d.errorMessage;
+      break;
+    }
+    case 'log': {
+      const s = findStep(state, d.stepId);
+      if (!s) { state.needReconnect = true; break; }
+      const lines = d.lines || [];
+      if (d.fromSeq > s.nextSeq) { state.needReconnect = true; break; } // gap
+      const fresh = lines.slice(Math.max(0, s.nextSeq - d.fromSeq)); // drop lines already seen
+      if (fresh.length > 0) {
+        s.logs += fresh.join('\n') + '\n';
+        s.nextSeq += fresh.length;
+      }
+      break;
+    }
+    case 'end':
+      state.ended = true;
+      state.endStatus = d.status;
+      if (d.status) { state.execution.status = d.status; }
+      break;
+  }
+  return state;
+}
+
+function formatDuration(ms) {
+  if (ms === null || ms === undefined) { return ''; }
+  return ms < 1000 ? ms + ' ms' : (ms / 1000).toFixed(1) + ' s';
+}
+
+// ---------------------------------------------------------------------------
+// Browser part (DOM, fetch). Log text is only ever set via textContent.
+// ---------------------------------------------------------------------------
+
+const RECONNECT_MS = 3000;
+const HTTP_ERRORS = {
+  401: 'Token invalid or expired (401).',
+  404: 'Execution not found, or it is not yours (404).',
+  429: 'Too many open streams for this user (429): close another monitor and retry.'
+};
+
+let state = newState();
+let session = 0; // incremented per Connect click; stale loops stop when it changes
+let controller = null;
+let reconnectTimer = null;
+const rendered = new Map(); // stepId -> {block, badge, meta, pre, logLength}
+
+function el(id) { return document.getElementById(id); }
+
+function setError(msg) { el('error').textContent = msg || ''; }
+function setConnection(msg) { el('connection').textContent = msg || ''; }
+
+function setBadge(node, status) {
+  node.textContent = status || '-';
+  node.className = 'badge' + (status ? ' ' + status : '');
+}
+
+function render(replaceAll) {
+  setBadge(el('execution-status'), state.execution.status);
+  const container = el('steps');
+  if (replaceAll) {
+    container.textContent = '';
+    rendered.clear();
+  }
+  for (const s of state.steps) {
+    let r = rendered.get(s.id);
+    if (!r) {
+      const block = document.createElement('div');
+      block.className = 'step';
+      const title = document.createElement('strong');
+      title.textContent = '#' + s.order + ' ';
+      const cmd = document.createElement('code');
+      cmd.textContent = s.command || '';
+      const badge = document.createElement('span');
+      const meta = document.createElement('span');
+      const pre = document.createElement('pre');
+      pre.className = 'log';
+      block.append(title, cmd, document.createTextNode(' '), badge, document.createTextNode(' '), meta, pre);
+      container.appendChild(block);
+      r = { block, badge, meta, pre, logLength: 0 };
+      rendered.set(s.id, r);
+    }
+    setBadge(r.badge, s.status);
+    r.meta.textContent = [formatDuration(s.duration), s.errorMessage].filter(Boolean).join(' - ');
+    if (s.logs.length !== r.logLength) {
+      r.pre.textContent = s.logs; // text, never HTML
+      r.logLength = s.logs.length;
+      r.pre.scrollTop = r.pre.scrollHeight; // auto-scroll to the newest line
+    }
+  }
+}
+
+function handleFrame(frame) {
+  let data;
+  try {
+    data = frame.data ? JSON.parse(frame.data) : {};
+  } catch (e) {
+    setError('Unparseable ' + frame.event + ' event: ' + e.message);
+    return;
+  }
+  applyEvent(state, frame.event, data);
+  render(frame.event === 'snapshot');
+}
+
+function scheduleReconnect(mySession) {
+  setConnection('disconnected, reconnecting in 3 s...');
+  reconnectTimer = setTimeout(() => connect(mySession), RECONNECT_MS);
+}
+
+async function connect(mySession) {
+  const token = el('token').value.trim();
+  const id = el('execution-id').value.trim();
+  controller = new AbortController();
+  setConnection('connecting...');
+  try {
+    const response = await fetch('/api/workflow-executions/' + encodeURIComponent(id) + '/stream', {
+      headers: { 'Authorization': 'Bearer ' + token, 'Accept': 'text/event-stream' },
+      signal: controller.signal
+    });
+    if (mySession !== session) { return; }
+    if (!response.ok) {
+      setError(HTTP_ERRORS[response.status] || ('HTTP error ' + response.status));
+      if (HTTP_ERRORS[response.status]) {
+        setConnection('stopped');
+        return; // 401, 404, 429: retrying will not help
+      }
+      scheduleReconnect(mySession);
+      return;
+    }
+    setError('');
+    setConnection('connected');
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    const parser = createSseParser();
+    while (true) {
+      const { value, done } = await reader.read();
+      if (mySession !== session) { return; }
+      if (done) { break; }
+      for (const frame of parser.feed(decoder.decode(value, { stream: true }))) {
+        handleFrame(frame);
+        if (state.ended) {
+          controller.abort();
+          setConnection('finished (' + state.endStatus + ')');
+          return; // end: no reconnect
+        }
+        if (state.needReconnect) {
+          controller.abort();
+          scheduleReconnect(mySession); // fresh snapshot on the new connection
+          return;
+        }
+      }
+    }
+    scheduleReconnect(mySession); // closed without "end"
+  } catch (e) {
+    if (mySession !== session) { return; }
+    setError('Connection error: ' + e.message);
+    scheduleReconnect(mySession);
+  }
+}
+
+function start() {
+  session++;
+  if (controller) { controller.abort(); }
+  clearTimeout(reconnectTimer);
+  state = newState();
+  render(true);
+  setError('');
+  if (!el('token').value.trim() || !el('execution-id').value.trim()) {
+    setError('Token and execution id are required.');
+    return;
+  }
+  connect(session);
+}
+
+async function login() {
+  setError('');
+  try {
+    const response = await fetch('/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: el('login-username').value, password: el('login-password').value })
+    });
+    if (!response.ok) {
+      setError('Login failed (HTTP ' + response.status + ').');
+      return;
+    }
+    el('token').value = (await response.json()).token;
+  } catch (e) {
+    setError('Login failed: ' + e.message);
+  }
+}
+
+if (typeof document !== 'undefined') {
+  el('connect').addEventListener('click', start);
+  el('login').addEventListener('click', login);
+}
+</script>
+</body>
+</html>

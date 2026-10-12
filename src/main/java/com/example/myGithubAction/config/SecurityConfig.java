@@ -1,6 +1,7 @@
 package com.example.myGithubAction.config;
 
 import jakarta.servlet.DispatcherType;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
@@ -26,6 +27,10 @@ public class SecurityConfig {
     private final JwtAuthenticationFilter jwtAuthenticationFilter;
     private final CorsConfigurationSource corsConfigurationSource;
 
+    /** Dev pages under /dev/** are public only when this is on (default off). */
+    @Value("${app.dev-ui.enabled:false}")
+    private boolean devUiEnabled;
+
     public SecurityConfig(
             JwtAuthenticationFilter jwtAuthenticationFilter,
             CorsConfigurationSource corsConfigurationSource
@@ -44,7 +49,12 @@ public class SecurityConfig {
             .csrf(csrf -> csrf.disable())
 
             // Configure authorization rules
-            .authorizeHttpRequests(auth -> auth
+            .authorizeHttpRequests(auth -> {
+              if (devUiEnabled) {
+                  // The page holds no data; its API calls still carry a JWT.
+                  auth.requestMatchers("/dev/**").permitAll();
+              }
+              auth
                 // Async re-dispatch (e.g. SseEmitter completion) of a request that was already
                 // authorized on its REQUEST dispatch. The JWT filter (OncePerRequestFilter) does
                 // not run again on it, so without this it is denied on a committed response.
@@ -66,8 +76,8 @@ public class SecurityConfig {
                 .requestMatchers("/api/**").authenticated()
 
                 // All other requests require authentication
-                .anyRequest().authenticated()
-            )
+                .anyRequest().authenticated();
+            })
 
             // Set session management to STATELESS
             .sessionManagement(sess ->
