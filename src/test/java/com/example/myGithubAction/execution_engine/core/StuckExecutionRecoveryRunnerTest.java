@@ -8,6 +8,7 @@ import com.example.myGithubAction.workflow.repository.WorkFlowExecutionStepRepos
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.EnumSet;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -44,17 +45,13 @@ class StuckExecutionRecoveryRunnerTest {
 
         runner.run();
 
-        assertEquals(ExecutionState.FAILED, stuckExecution.getStatus());
-        assertNotNull(stuckExecution.getErrorMessage());
-        assertNotNull(stuckExecution.getEndedAt());
-
-        assertEquals(ExecutionState.FAILED, stuckStep.getStatus());
-        assertNotNull(stuckStep.getErrorMessage());
-        assertNotNull(stuckStep.getEndedAt());
-
-        verify(executionRepository).saveAll(List.of(stuckExecution));
-        verify(stepRepository).saveAll(List.of(stuckStep));
+        verify(executionRepository).transition(eq(1L), eq(EnumSet.of(ExecutionState.RUNNING)),
+            eq(ExecutionState.FAILED), any(), eq("Interrupted by application restart"));
+        verify(stepRepository).transition(eq(10L), eq(EnumSet.of(ExecutionState.RUNNING)),
+            eq(ExecutionState.FAILED), any(), isNull(), eq("Interrupted by application restart"));
         verify(workspaceManager).deleteWorkspace(1L);
+        verify(executionRepository, never()).saveAll(any());
+        verify(stepRepository, never()).saveAll(any());
     }
 
     @Test
@@ -66,7 +63,7 @@ class StuckExecutionRecoveryRunnerTest {
 
         verify(executionRepository, never()).findByStatus(ExecutionState.PENDING);
         verify(stepRepository, never()).findByStatus(ExecutionState.PENDING);
-        verify(executionRepository).saveAll(List.of());
-        verify(stepRepository).saveAll(List.of());
+        verify(executionRepository, never()).transition(anyLong(), any(), any(), any(), any());
+        verify(stepRepository, never()).transition(anyLong(), any(), any(), any(), any(), any());
     }
 }
