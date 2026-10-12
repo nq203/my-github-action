@@ -22,6 +22,7 @@ import com.example.myGithubAction.workflow.repository.StepRepository;
 import com.example.myGithubAction.workflow.repository.WorkFlowExecutionRepository;
 import com.example.myGithubAction.workflow.repository.WorkFlowExecutionStepRepository;
 import com.example.myGithubAction.messaging.ExecutionDispatcher;
+import com.example.myGithubAction.messaging.ExecutionEventPublisher;
 
 import java.time.LocalDateTime;
 import java.util.*;
@@ -37,6 +38,7 @@ public class WorkFlowExecutionService {
     private final StepRepository stepRepository;
     private final ExecutionDispatcher executionDispatcher;
     private final TransactionTemplate newTransaction;
+    private final ExecutionEventPublisher eventPublisher;
 
     public WorkFlowExecutionService(
             WorkFlowExecutionRepository executionRepository,
@@ -44,12 +46,14 @@ public class WorkFlowExecutionService {
             WorkFlowRepository workflowRepository,
             StepRepository stepRepository,
             ExecutionDispatcher executionDispatcher,
+            ExecutionEventPublisher eventPublisher,
             PlatformTransactionManager transactionManager) {
         this.executionRepository = executionRepository;
         this.executionStepRepository = executionStepRepository;
         this.workflowRepository = workflowRepository;
         this.stepRepository = stepRepository;
         this.executionDispatcher = executionDispatcher;
+        this.eventPublisher = eventPublisher;
         // In afterCommit the outer transaction is already committed but still bound to the thread,
         // so plain @Transactional calls fail with "no transaction is in progress": use a new one.
         this.newTransaction = new TransactionTemplate(transactionManager);
@@ -144,9 +148,12 @@ public class WorkFlowExecutionService {
      * @param reason why the dispatcher rejected it
      */
     private void markExecutionRejected(Long executionId, String reason) {
-        newTransaction.executeWithoutResult(status -> executionRepository.transition(
+        Integer updated = newTransaction.execute(status -> executionRepository.transition(
                 executionId, EnumSet.of(ExecutionState.PENDING), ExecutionState.FAILED,
                 LocalDateTime.now(), "Execution rejected: " + reason));
+        if (updated != null && updated > 0) {
+            publishQuietly(() -> eventPublisher.executionChanged(executionId));
+        }
     }
 
     /**
@@ -218,6 +225,7 @@ public class WorkFlowExecutionService {
         if (request.getLogs() != null) {
             executionRepository.updateLogs(executionId, request.getLogs(), now);
         }
+        runAfterCommit(() -> publishQuietly(() -> eventPublisher.executionChanged(executionId)));
 
         return getExecution(executionId);
     }
@@ -240,6 +248,7 @@ public class WorkFlowExecutionService {
             // Signal workers only once CANCELLED is committed, so they never observe the
             // signal before the DB state.
             runAfterCommit(() -> executionDispatcher.requestCancel(executionId));
+            runAfterCommit(() -> publishQuietly(() -> eventPublisher.executionChanged(executionId)));
         }
         return getExecution(executionId);
     }
@@ -320,6 +329,8 @@ public class WorkFlowExecutionService {
         if (request.getLogs() != null) {
             executionStepRepository.updateLogs(stepId, request.getLogs(), now);
         }
+        final Long parentExecutionId = step.getExecutionId();
+        runAfterCommit(() -> publishQuietly(() -> eventPublisher.stepsOfExecutionChanged(parentExecutionId)));
 
         return getExecutionStep(stepId);
     }
@@ -341,6 +352,14 @@ public class WorkFlowExecutionService {
             return ExecutionState.valueOf(status);
         } catch (IllegalArgumentException | NullPointerException e) {
             throw new BadRequestException("Unknown execution status: " + status);
+        }
+    }
+
+    private void publishQuietly(Runnable event) {
+        try {
+            event.run();
+        } catch (RuntimeException e) {
+            log.warn("Could not publish status event: {}", e.getMessage());
         }
     }
 

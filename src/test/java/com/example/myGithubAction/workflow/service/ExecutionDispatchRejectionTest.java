@@ -2,6 +2,7 @@ package com.example.myGithubAction.workflow.service;
 
 import com.example.myGithubAction.common.ExecutionState;
 import com.example.myGithubAction.messaging.ExecutionDispatcher;
+import com.example.myGithubAction.messaging.ExecutionEventPublisher;
 import com.example.myGithubAction.workflow.dto.WorkFlowExecutionRequest;
 import com.example.myGithubAction.workflow.entity.Step;
 import com.example.myGithubAction.workflow.entity.WorkFlow;
@@ -19,6 +20,8 @@ import java.util.concurrent.RejectedExecutionException;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 
 /**
  * The after-commit bookkeeping runs in a REAL transaction here (the unit test with mocks
@@ -29,6 +32,8 @@ class ExecutionDispatchRejectionTest {
 
     @MockBean
     private ExecutionDispatcher dispatcher;
+    @MockBean
+    private ExecutionEventPublisher eventPublisher;
     @Autowired
     private WorkFlowExecutionService service;
     @Autowired
@@ -59,6 +64,22 @@ class ExecutionDispatchRejectionTest {
         assertEquals("Execution rejected: broker down", stored.getErrorMessage());
         assertNotNull(stored.getEndedAt());
         assertNull(stored.getLastDispatchedAt());
+    }
+
+    @Test
+    void rejectedDispatchEmitsExecutionChanged() {
+        doThrow(new RejectedExecutionException("broker down")).when(dispatcher).dispatch(anyLong());
+
+        Long executionId = create(workflowWithStep());
+
+        verify(eventPublisher).executionChanged(executionId);
+    }
+
+    @Test
+    void acceptedDispatchEmitsNothing() {
+        Long executionId = create(workflowWithStep());
+
+        verify(eventPublisher, never()).executionChanged(executionId);
     }
 
     @Test

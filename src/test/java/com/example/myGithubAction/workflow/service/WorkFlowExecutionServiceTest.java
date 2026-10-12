@@ -3,6 +3,7 @@ package com.example.myGithubAction.workflow.service;
 import com.example.myGithubAction.auth.exception.BadRequestException;
 import com.example.myGithubAction.common.ExecutionState;
 import com.example.myGithubAction.messaging.ExecutionDispatcher;
+import com.example.myGithubAction.messaging.ExecutionEventPublisher;
 import com.example.myGithubAction.workflow.dto.ExecutionStatusUpdateRequest;
 import com.example.myGithubAction.workflow.dto.WorkFlowExecutionRequest;
 import com.example.myGithubAction.workflow.entity.WorkFlow;
@@ -32,6 +33,7 @@ class WorkFlowExecutionServiceTest {
     private WorkFlowRepository workflowRepository;
     private StepRepository stepRepository;
     private ExecutionDispatcher executionDispatcher;
+    private ExecutionEventPublisher eventPublisher;
     private WorkFlowExecutionService service;
 
     @BeforeEach
@@ -42,9 +44,10 @@ class WorkFlowExecutionServiceTest {
         stepRepository = mock(StepRepository.class);
         executionDispatcher = mock(ExecutionDispatcher.class);
 
+        eventPublisher = mock(ExecutionEventPublisher.class);
         service = new WorkFlowExecutionService(
             executionRepository, executionStepRepository, workflowRepository,
-            stepRepository, executionDispatcher, mock(PlatformTransactionManager.class));
+            stepRepository, executionDispatcher, eventPublisher, mock(PlatformTransactionManager.class));
 
         TransactionSynchronizationManager.initSynchronization();
     }
@@ -175,5 +178,77 @@ class WorkFlowExecutionServiceTest {
         service.deleteExecution(12L);
 
         verify(executionRepository).delete(execution);
+    }
+
+    // ---------- live-monitor events ----------
+
+    @Test
+    void cancelEmitsAfterCommitOnlyWhenUpdated() {
+        stored(13L, ExecutionState.RUNNING);
+        when(executionRepository.transition(eq(13L), eq(ExecutionState.CANCELLABLE),
+            eq(ExecutionState.CANCELLED), any(), isNull())).thenReturn(1);
+
+        service.cancelExecution(13L);
+
+        verifyNoInteractions(eventPublisher);
+        commit();
+        verify(eventPublisher).executionChanged(13L);
+    }
+
+    @Test
+    void cancelThatUpdatedNothingEmitsNothing() {
+        stored(14L, ExecutionState.SUCCESS);
+        when(executionRepository.transition(eq(14L), any(), eq(ExecutionState.CANCELLED), any(), any())).thenReturn(0);
+
+        service.cancelExecution(14L);
+        commit();
+
+        verifyNoInteractions(eventPublisher);
+    }
+
+    @Test
+    void patchStatusEmitsEvents() {
+        stored(15L, ExecutionState.RUNNING);
+        when(executionRepository.transition(eq(15L), any(), eq(ExecutionState.SUCCESS), any(), any())).thenReturn(1);
+        ExecutionStatusUpdateRequest request = new ExecutionStatusUpdateRequest();
+        request.setStatus("SUCCESS");
+
+        service.updateExecutionStatus(15L, request);
+
+        verifyNoInteractions(eventPublisher);
+        commit();
+        verify(eventPublisher).executionChanged(15L);
+    }
+
+    @Test
+    void patchStatusLosingTheRaceEmitsNothing() {
+        stored(16L, ExecutionState.RUNNING);
+        when(executionRepository.transition(eq(16L), any(), eq(ExecutionState.SUCCESS), any(), any())).thenReturn(0);
+        ExecutionStatusUpdateRequest request = new ExecutionStatusUpdateRequest();
+        request.setStatus("SUCCESS");
+
+        assertThrows(BadRequestException.class, () -> service.updateExecutionStatus(16L, request));
+        commit();
+
+        verifyNoInteractions(eventPublisher);
+    }
+
+    @Test
+    void patchStepStatusEmitsStepsOfExecutionChanged() {
+        var step = new com.example.myGithubAction.workflow.entity.WorkFlowExecutionStep();
+        step.setId(30L);
+        step.setExecutionId(17L);
+        step.setStatus(ExecutionState.RUNNING);
+        when(executionStepRepository.findById(30L)).thenReturn(Optional.of(step));
+        when(executionStepRepository.transition(eq(30L), any(), eq(ExecutionState.SUCCESS), any(), any(), any()))
+            .thenReturn(1);
+        ExecutionStatusUpdateRequest request = new ExecutionStatusUpdateRequest();
+        request.setStatus("SUCCESS");
+
+        service.updateExecutionExecutionState(30L, request);
+
+        verifyNoInteractions(eventPublisher);
+        commit();
+        verify(eventPublisher).stepsOfExecutionChanged(17L);
     }
 }

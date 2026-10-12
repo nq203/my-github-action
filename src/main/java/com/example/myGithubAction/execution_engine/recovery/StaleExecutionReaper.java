@@ -1,5 +1,6 @@
 package com.example.myGithubAction.execution_engine.recovery;
 
+import com.example.myGithubAction.messaging.ExecutionEventPublisher;
 import com.example.myGithubAction.workflow.repository.WorkFlowExecutionRepository;
 import com.example.myGithubAction.workflow.repository.WorkFlowExecutionStepRepository;
 import lombok.extern.slf4j.Slf4j;
@@ -25,14 +26,17 @@ public class StaleExecutionReaper {
     private final WorkFlowExecutionRepository executionRepository;
     private final WorkFlowExecutionStepRepository stepRepository;
     private final WorkerProperties properties;
+    private final ExecutionEventPublisher eventPublisher;
 
     public StaleExecutionReaper(
             WorkFlowExecutionRepository executionRepository,
             WorkFlowExecutionStepRepository stepRepository,
-            WorkerProperties properties) {
+            WorkerProperties properties,
+            ExecutionEventPublisher eventPublisher) {
         this.executionRepository = executionRepository;
         this.stepRepository = stepRepository;
         this.properties = properties;
+        this.eventPublisher = eventPublisher;
     }
 
     @Scheduled(fixedDelayString = "${app.worker.reaper-interval-ms:15000}")
@@ -44,7 +48,11 @@ public class StaleExecutionReaper {
         try {
             for (Long executionId : executionRepository.findStaleRunningIds(cutoff)) {
                 if (executionRepository.failIfStale(executionId, cutoff, now, message) > 0) {
-                    stepRepository.failRunningSteps(executionId, now, message);
+                    int stepsFailed = stepRepository.failRunningSteps(executionId, now, message);
+                    if (stepsFailed > 0) {
+                        eventPublisher.stepsOfExecutionChanged(executionId);
+                    }
+                    eventPublisher.executionChanged(executionId);
                     log.warn("Execution {} failed: {}", executionId, message);
                 }
             }

@@ -1,5 +1,6 @@
 package com.example.myGithubAction.execution_engine.recovery;
 
+import com.example.myGithubAction.messaging.ExecutionEventPublisher;
 import com.example.myGithubAction.workflow.repository.WorkFlowExecutionRepository;
 import com.example.myGithubAction.workflow.repository.WorkFlowExecutionStepRepository;
 import org.junit.jupiter.api.BeforeEach;
@@ -15,15 +16,17 @@ class StaleExecutionReaperTest {
 
     private WorkFlowExecutionRepository executionRepository;
     private WorkFlowExecutionStepRepository stepRepository;
+    private ExecutionEventPublisher eventPublisher;
     private StaleExecutionReaper reaper;
 
     @BeforeEach
     void setUp() {
         executionRepository = mock(WorkFlowExecutionRepository.class);
         stepRepository = mock(WorkFlowExecutionStepRepository.class);
+        eventPublisher = mock(ExecutionEventPublisher.class);
         WorkerProperties properties = new WorkerProperties();
         properties.setStaleAfterMs(60_000);
-        reaper = new StaleExecutionReaper(executionRepository, stepRepository, properties);
+        reaper = new StaleExecutionReaper(executionRepository, stepRepository, properties, eventPublisher);
     }
 
     @Test
@@ -62,5 +65,20 @@ class StaleExecutionReaperTest {
         when(executionRepository.findStaleRunningIds(any())).thenThrow(new IllegalStateException("db down"));
 
         reaper.reap(); // must not throw
+    }
+
+    @Test
+    void reaperEmitsOnlyWhenFailIfStaleUpdated() {
+        when(executionRepository.findStaleRunningIds(any())).thenReturn(List.of(5L, 6L));
+        when(executionRepository.failIfStale(eq(5L), any(), any(), any())).thenReturn(1);
+        when(executionRepository.failIfStale(eq(6L), any(), any(), any())).thenReturn(0);
+        when(stepRepository.failRunningSteps(eq(5L), any(), any())).thenReturn(1);
+
+        reaper.reap();
+
+        verify(eventPublisher).executionChanged(5L);
+        verify(eventPublisher).stepsOfExecutionChanged(5L);
+        verify(eventPublisher, never()).executionChanged(6L);
+        verify(eventPublisher, never()).stepsOfExecutionChanged(6L);
     }
 }

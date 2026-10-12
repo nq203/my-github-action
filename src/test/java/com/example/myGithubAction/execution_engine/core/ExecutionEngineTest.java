@@ -1,6 +1,7 @@
 package com.example.myGithubAction.execution_engine.core;
 
 import com.example.myGithubAction.common.ExecutionState;
+import com.example.myGithubAction.messaging.ExecutionEventPublisher;
 import com.example.myGithubAction.execution_engine.dto.StepExecutionResult;
 import com.example.myGithubAction.execution_engine.error.ErrorHandler;
 import com.example.myGithubAction.execution_engine.executor.StepExecutor;
@@ -10,6 +11,7 @@ import com.example.myGithubAction.workflow.repository.WorkFlowExecutionRepositor
 import com.example.myGithubAction.workflow.repository.WorkFlowExecutionStepRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.InOrder;
 
 import java.nio.file.Path;
 import java.util.EnumSet;
@@ -30,6 +32,7 @@ class ExecutionEngineTest {
     private ErrorHandler errorHandler;
     private ExecutionCancellationRegistry cancellationRegistry;
     private WorkspaceManager workspaceManager;
+    private ExecutionEventPublisher eventPublisher;
     private ExecutionEngine engine;
 
     @BeforeEach
@@ -43,9 +46,10 @@ class ExecutionEngineTest {
         workspaceManager = mock(WorkspaceManager.class);
         doReturn(Path.of(System.getProperty("java.io.tmpdir"), "workspace-1"))
             .when(workspaceManager).createWorkspace(anyLong());
+        eventPublisher = mock(ExecutionEventPublisher.class);
         engine = new ExecutionEngine(
             executionRepository, stepRepository, stepExecutor, logManager,
-            errorHandler, cancellationRegistry, workspaceManager, new WorkerIdentity("worker-test"));
+            errorHandler, cancellationRegistry, workspaceManager, new WorkerIdentity("worker-test"), eventPublisher);
 
         // Default: this worker wins the claim and every transition applies.
         when(executionRepository.claimPending(anyLong(), eq("worker-test"), any())).thenReturn(1);
@@ -206,5 +210,95 @@ class ExecutionEngineTest {
 
         verify(stepExecutor).execute(any());
         verify(logManager, never()).appendLog(eq(10L), eq("streamed output"));
+    }
+
+    // ---------- live-monitor events ----------
+
+    @Test
+    void engineEmitsClaimStepAndCompletionEventsInOrder() throws Exception {
+        Long executionId = 20L;
+        WorkFlowExecutionStep step = step(200L, executionId, 0);
+        when(stepRepository.findByExecutionIdOrderByStepOrder(executionId)).thenReturn(List.of(step));
+        when(stepExecutor.execute(any())).thenReturn(StepExecutionResult.success("ok"));
+        WorkFlowExecutionStep done = step(200L, executionId, 0);
+        done.setStatus(ExecutionState.SUCCESS);
+        when(stepRepository.findByExecutionId(executionId)).thenReturn(List.of(done));
+
+        engine.startExecution(executionId);
+
+        InOrder order = inOrder(eventPublisher, logManager);
+        order.verify(eventPublisher).executionChanged(executionId);   // claim
+        order.verify(eventPublisher, times(2)).stepChanged(200L);     // running, then success
+        order.verify(logManager).flush();
+        order.verify(eventPublisher).executionChanged(executionId);   // final, after the last log flush
+        verifyNoMoreInteractions(eventPublisher);
+    }
+
+    @Test
+    void lostClaimEmitsNothing() {
+        when(executionRepository.claimPending(eq(21L), any(), any())).thenReturn(0);
+
+        engine.startExecution(21L);
+
+        verifyNoInteractions(eventPublisher);
+    }
+
+    @Test
+    void failedStepEmitsStepAndExecutionEvents() throws Exception {
+        Long executionId = 22L;
+        WorkFlowExecutionStep step = step(220L, executionId, 0);
+        when(stepRepository.findByExecutionIdOrderByStepOrder(executionId)).thenReturn(List.of(step));
+        when(stepExecutor.execute(any())).thenReturn(StepExecutionResult.failure("command not found"));
+
+        engine.startExecution(executionId);
+
+        InOrder order = inOrder(eventPublisher);
+        order.verify(eventPublisher).executionChanged(executionId);
+        order.verify(eventPublisher, times(2)).stepChanged(220L);   // running, then failed
+        order.verify(eventPublisher).executionChanged(executionId);
+    }
+
+    @Test
+    void lostCompareAndSetEmitsNoStepOrExecutionEvent() throws Exception {
+        Long executionId = 23L;
+        WorkFlowExecutionStep step = step(230L, executionId, 0);
+        when(stepRepository.findByExecutionIdOrderByStepOrder(executionId)).thenReturn(List.of(step));
+        when(stepExecutor.execute(any())).thenReturn(StepExecutionResult.failure("command not found"));
+        when(stepRepository.transition(anyLong(), any(), any(), any(), any(), any())).thenReturn(0);
+        when(executionRepository.transition(anyLong(), any(), any(), any(), any())).thenReturn(0); // cancel won
+
+        engine.startExecution(executionId);
+
+        verify(eventPublisher, times(1)).executionChanged(executionId); // only the claim
+        verify(eventPublisher, times(1)).stepChanged(230L);              // only running
+    }
+
+    @Test
+    void failClaimedEmitsExecutionAndStepEvents() {
+        when(stepRepository.failRunningSteps(eq(24L), any(), any())).thenReturn(1);
+
+        engine.failClaimed(24L, "boom");
+
+        verify(eventPublisher).stepsOfExecutionChanged(24L);
+        verify(eventPublisher).executionChanged(24L);
+    }
+
+    @Test
+    void publisherThrowingDoesNotBreakEngineRun() throws Exception {
+        Long executionId = 25L;
+        doThrow(new IllegalStateException("kafka down")).when(eventPublisher).executionChanged(anyLong());
+        doThrow(new IllegalStateException("kafka down")).when(eventPublisher).stepChanged(anyLong());
+        WorkFlowExecutionStep step = step(250L, executionId, 0);
+        when(stepRepository.findByExecutionIdOrderByStepOrder(executionId)).thenReturn(List.of(step));
+        when(stepExecutor.execute(any())).thenReturn(StepExecutionResult.success("ok"));
+        WorkFlowExecutionStep done = step(250L, executionId, 0);
+        done.setStatus(ExecutionState.SUCCESS);
+        when(stepRepository.findByExecutionId(executionId)).thenReturn(List.of(done));
+
+        engine.startExecution(executionId);
+
+        verify(stepExecutor, times(1)).execute(any());
+        verify(stepRepository, never()).transition(eq(250L), any(), eq(ExecutionState.FAILED), any(), any(), any());
+        verify(executionRepository).transition(eq(executionId), any(), eq(ExecutionState.SUCCESS), any(), isNull());
     }
 }

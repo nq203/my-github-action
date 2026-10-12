@@ -3,6 +3,7 @@ package com.example.myGithubAction.execution_engine.recovery;
 import com.example.myGithubAction.common.ExecutionState;
 import com.example.myGithubAction.execution_engine.core.WorkerIdentity;
 import com.example.myGithubAction.execution_engine.core.WorkspaceManager;
+import com.example.myGithubAction.messaging.ExecutionEventPublisher;
 import com.example.myGithubAction.workflow.repository.WorkFlowExecutionRepository;
 import com.example.myGithubAction.workflow.repository.WorkFlowExecutionStepRepository;
 import org.springframework.boot.CommandLineRunner;
@@ -32,16 +33,19 @@ public class StuckExecutionRecoveryRunner implements CommandLineRunner {
     private final WorkFlowExecutionStepRepository stepRepository;
     private final WorkspaceManager workspaceManager;
     private final WorkerIdentity workerIdentity;
+    private final ExecutionEventPublisher eventPublisher;
 
     public StuckExecutionRecoveryRunner(
             WorkFlowExecutionRepository executionRepository,
             WorkFlowExecutionStepRepository stepRepository,
             WorkspaceManager workspaceManager,
-            WorkerIdentity workerIdentity) {
+            WorkerIdentity workerIdentity,
+            ExecutionEventPublisher eventPublisher) {
         this.executionRepository = executionRepository;
         this.stepRepository = stepRepository;
         this.workspaceManager = workspaceManager;
         this.workerIdentity = workerIdentity;
+        this.eventPublisher = eventPublisher;
     }
 
     @Override
@@ -53,8 +57,15 @@ public class StuckExecutionRecoveryRunner implements CommandLineRunner {
         LocalDateTime now = LocalDateTime.now();
         for (Long executionId : executionRepository.findRunningIdsByWorker(workerIdentity.id())) {
             workspaceManager.deleteWorkspace(executionId);
-            executionRepository.transition(executionId, RUNNING, ExecutionState.FAILED, now, INTERRUPTED_MESSAGE);
-            stepRepository.failRunningSteps(executionId, now, INTERRUPTED_MESSAGE);
+            int executionUpdated = executionRepository
+                .transition(executionId, RUNNING, ExecutionState.FAILED, now, INTERRUPTED_MESSAGE);
+            int stepsFailed = stepRepository.failRunningSteps(executionId, now, INTERRUPTED_MESSAGE);
+            if (stepsFailed > 0) {
+                eventPublisher.stepsOfExecutionChanged(executionId);
+            }
+            if (executionUpdated > 0) {
+                eventPublisher.executionChanged(executionId);
+            }
         }
     }
 }

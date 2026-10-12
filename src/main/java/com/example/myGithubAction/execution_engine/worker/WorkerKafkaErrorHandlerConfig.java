@@ -2,6 +2,7 @@ package com.example.myGithubAction.execution_engine.worker;
 
 import com.example.myGithubAction.common.ExecutionState;
 import com.example.myGithubAction.messaging.ExecutionEventCodec;
+import com.example.myGithubAction.messaging.ExecutionEventPublisher;
 import com.example.myGithubAction.messaging.ExecutionKafkaProperties;
 import com.example.myGithubAction.workflow.repository.WorkFlowExecutionRepository;
 import lombok.extern.slf4j.Slf4j;
@@ -39,7 +40,8 @@ public class WorkerKafkaErrorHandlerConfig {
     public CommonErrorHandler executionKafkaErrorHandler(
             KafkaTemplate<String, String> kafkaTemplate,
             WorkFlowExecutionRepository executionRepository,
-            ExecutionKafkaProperties properties) {
+            ExecutionKafkaProperties properties,
+            ExecutionEventPublisher eventPublisher) {
         DeadLetterPublishingRecoverer deadLetters = new DeadLetterPublishingRecoverer(kafkaTemplate,
                 (record, ex) -> new TopicPartition(record.topic() + ".DLT", -1));
 
@@ -49,7 +51,7 @@ public class WorkerKafkaErrorHandlerConfig {
                 return;
             }
             deadLetters.accept(record, ex);
-            markFailed(executionRepository, record.key(), ex);
+            markFailed(executionRepository, eventPublisher, record.key(), ex);
         };
 
         DefaultErrorHandler handler = new DefaultErrorHandler(recoverer, new FixedBackOff(1000L, 3));
@@ -61,11 +63,16 @@ public class WorkerKafkaErrorHandlerConfig {
         return handler;
     }
 
-    private void markFailed(WorkFlowExecutionRepository executionRepository, Object key, Exception cause) {
+    private void markFailed(WorkFlowExecutionRepository executionRepository, ExecutionEventPublisher eventPublisher,
+                            Object key, Exception cause) {
         try {
             Long executionId = Long.valueOf(String.valueOf(key));
-            executionRepository.transition(executionId, EnumSet.of(ExecutionState.PENDING), ExecutionState.FAILED,
-                    LocalDateTime.now(), "Execution could not be dispatched: " + cause.getMessage());
+            int updated = executionRepository.transition(executionId, EnumSet.of(ExecutionState.PENDING),
+                    ExecutionState.FAILED, LocalDateTime.now(),
+                    "Execution could not be dispatched: " + cause.getMessage());
+            if (updated > 0) {
+                eventPublisher.executionChanged(executionId);
+            }
         } catch (RuntimeException e) {
             log.error("Could not mark dead-lettered execution {} as FAILED", key, e);
         }

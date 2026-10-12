@@ -1,6 +1,8 @@
 package com.example.myGithubAction.execution_engine.core;
 
 import com.example.myGithubAction.workflow.entity.WorkFlowExecutionStep;
+import com.example.myGithubAction.messaging.ExecutionEventPublisher;
+import lombok.extern.slf4j.Slf4j;
 import com.example.myGithubAction.execution_engine.executor.StepExecutor;
 import com.example.myGithubAction.execution_engine.logging.LogManager;
 import com.example.myGithubAction.common.ExecutionState;
@@ -30,6 +32,7 @@ import java.util.concurrent.CompletableFuture;
  * ExecutionState for the allowed transitions): the engine never save()s a
  * loaded entity, so a concurrent cancel can never be overwritten.
  */
+@Slf4j
 @Service
 public class ExecutionEngine {
 
@@ -46,6 +49,7 @@ public class ExecutionEngine {
     private final ExecutionCancellationRegistry cancellationRegistry;
     private final WorkspaceManager workspaceManager;
     private final WorkerIdentity workerIdentity;
+    private final ExecutionEventPublisher eventPublisher;
 
     public ExecutionEngine(
             WorkFlowExecutionRepository workFlowExecutionRepository,
@@ -55,7 +59,8 @@ public class ExecutionEngine {
             ErrorHandler errorHandler,
             ExecutionCancellationRegistry cancellationRegistry,
             WorkspaceManager workspaceManager,
-            WorkerIdentity workerIdentity) {
+            WorkerIdentity workerIdentity,
+            ExecutionEventPublisher eventPublisher) {
         this.workFlowExecutionRepository = workFlowExecutionRepository;
         this.workFlowExecutionStepRepository = workFlowExecutionStepRepository;
         this.stepExecutor = stepExecutor;
@@ -64,6 +69,16 @@ public class ExecutionEngine {
         this.cancellationRegistry = cancellationRegistry;
         this.workspaceManager = workspaceManager;
         this.workerIdentity = workerIdentity;
+        this.eventPublisher = eventPublisher;
+    }
+
+    /** Live-monitor events are best effort: a publisher failure must never change the job's outcome. */
+    private void publish(Runnable event) {
+        try {
+            event.run();
+        } catch (RuntimeException e) {
+            log.warn("Could not publish status event: {}", e.getMessage());
+        }
     }
 
     /**
@@ -81,6 +96,7 @@ public class ExecutionEngine {
             .claimPending(executionId, workerIdentity.id(), LocalDateTime.now()) > 0;
         if (claimed) {
             cancellationRegistry.register(executionId);
+            publish(() -> eventPublisher.executionChanged(executionId));
         }
         return claimed;
     }
@@ -125,8 +141,15 @@ public class ExecutionEngine {
     /** Fails a claimed (RUNNING) execution that could not be run. No-op if it already finished or was cancelled. */
     public void failClaimed(Long executionId, String message) {
         LocalDateTime now = LocalDateTime.now();
-        workFlowExecutionRepository.transition(executionId, EXECUTION_RUNNING, ExecutionState.FAILED, now, message);
-        workFlowExecutionStepRepository.failRunningSteps(executionId, now, message);
+        int executionUpdated = workFlowExecutionRepository
+            .transition(executionId, EXECUTION_RUNNING, ExecutionState.FAILED, now, message);
+        int stepsUpdated = workFlowExecutionStepRepository.failRunningSteps(executionId, now, message);
+        if (stepsUpdated > 0) {
+            publish(() -> eventPublisher.stepsOfExecutionChanged(executionId));
+        }
+        if (executionUpdated > 0) {
+            publish(() -> eventPublisher.executionChanged(executionId));
+        }
         cancellationRegistry.unregister(executionId);
     }
 
@@ -183,7 +206,9 @@ public class ExecutionEngine {
             LocalDateTime startedAt = LocalDateTime.now();
             try {
                 // 1. Step → RUNNING + timestamp (targeted update, logs untouched)
-                workFlowExecutionStepRepository.markRunning(stepId, startedAt);
+                if (workFlowExecutionStepRepository.markRunning(stepId, startedAt) > 0) {
+                    publish(() -> eventPublisher.stepChanged(stepId));
+                }
 
                 // 2. Call StepExecutor.execute() using injected instance
                 StepExecutionResult result = this.stepExecutor.execute(step);
@@ -202,8 +227,11 @@ public class ExecutionEngine {
                 }
 
                 LocalDateTime endedAt = LocalDateTime.now();
-                workFlowExecutionStepRepository.transition(stepId, STEP_RUNNING, ExecutionState.SUCCESS,
+                int stepUpdated = workFlowExecutionStepRepository.transition(stepId, STEP_RUNNING, ExecutionState.SUCCESS,
                     endedAt, Duration.between(startedAt, endedAt).toMillis(), null);
+                if (stepUpdated > 0) {
+                    publish(() -> eventPublisher.stepChanged(stepId));
+                }
                 return true;
 
             } catch (Exception e) {
@@ -231,8 +259,11 @@ public class ExecutionEngine {
                 // Capture error log, then step → FAILED
                 logManager.appendLog(stepId, "[FAILED] " + e.getMessage());
                 LocalDateTime endedAt = LocalDateTime.now();
-                workFlowExecutionStepRepository.transition(stepId, STEP_RUNNING, ExecutionState.FAILED,
+                int stepUpdated = workFlowExecutionStepRepository.transition(stepId, STEP_RUNNING, ExecutionState.FAILED,
                     endedAt, Duration.between(startedAt, endedAt).toMillis(), e.getMessage());
+                if (stepUpdated > 0) {
+                    publish(() -> eventPublisher.stepChanged(stepId));
+                }
 
                 // Handle workflow error
                 handleError(executionId, e);
@@ -257,11 +288,16 @@ public class ExecutionEngine {
         ExecutionState finalStatus = allSuccessful ? ExecutionState.SUCCESS : ExecutionState.FAILED;
 
         // 3. Atomically finish (status + endedAt)
-        workFlowExecutionRepository.transition(
+        int updated = workFlowExecutionRepository.transition(
             executionId, EXECUTION_RUNNING, finalStatus, LocalDateTime.now(), null);
 
         // 4. Flush logs to database
         logManager.flush();
+
+        // 5. Announce the terminal state only after the last log flush
+        if (updated > 0) {
+            publish(() -> eventPublisher.executionChanged(executionId));
+        }
     }
 
     /**
@@ -269,7 +305,10 @@ public class ExecutionEngine {
      * Affects 0 rows (and so changes nothing) if a cancel already won.
      */
     private void handleError(Long executionId, Exception error) {
-        workFlowExecutionRepository.transition(
+        int updated = workFlowExecutionRepository.transition(
             executionId, EXECUTION_RUNNING, ExecutionState.FAILED, LocalDateTime.now(), error.getMessage());
+        if (updated > 0) {
+            publish(() -> eventPublisher.executionChanged(executionId));
+        }
     }
 }
