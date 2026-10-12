@@ -31,6 +31,12 @@ public class User {
     @Column(nullable = false)
     private String fullName;
 
+    /** Null (a row that predates the column) is read as USER, see {@link #getRole()}. */
+    @Builder.Default
+    @Enumerated(EnumType.STRING)
+    @Column(columnDefinition = "varchar(255) default 'USER'")
+    private Role role = Role.USER;
+
     @Builder.Default
     @Column(columnDefinition = "boolean default true")
     private Boolean active = true;
@@ -43,6 +49,10 @@ public class User {
 
     @Column(name = "last_login")
     private LocalDateTime lastLogin;
+
+    public Role getRole() {
+        return role == null ? Role.USER : role;
+    }
 
     @PrePersist
     protected void onCreate() {

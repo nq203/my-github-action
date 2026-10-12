@@ -251,4 +251,26 @@ class WorkFlowExecutionServiceTest {
         commit();
         verify(eventPublisher).stepsOfExecutionChanged(17L);
     }
+
+    @Test
+    void patchStepStatusIgnoresLogsField() {
+        var step = new com.example.myGithubAction.workflow.entity.WorkFlowExecutionStep();
+        step.setId(31L);
+        step.setExecutionId(18L);
+        step.setStatus(ExecutionState.RUNNING);
+        step.setLogs("kept");
+        when(executionStepRepository.findById(31L)).thenReturn(Optional.of(step));
+        when(executionStepRepository.transition(eq(31L), any(), eq(ExecutionState.SUCCESS), any(), any(), any()))
+            .thenReturn(1);
+        ExecutionStatusUpdateRequest request = new ExecutionStatusUpdateRequest();
+        request.setStatus("SUCCESS");
+        request.setLogs("overwritten");
+
+        service.updateExecutionExecutionState(31L, request);
+
+        // only the status transition writes; no other repository write (the logs update is gone)
+        verify(executionStepRepository).transition(eq(31L), any(), eq(ExecutionState.SUCCESS), any(), any(), any());
+        verify(executionStepRepository, never()).save(any());
+        assertEquals("kept", step.getLogs());
+    }
 }

@@ -7,6 +7,7 @@ import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.http.SessionCreationPolicy;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.authentication.HttpStatusEntryPoint;
@@ -58,6 +59,9 @@ public class SecurityConfig {
                     "/swagger-ui.html",
                     "/api/auth/**"
                 ).permitAll()
+                // Manual status override of executions/steps: admin only (authenticated non-admin
+                // gets 403 from the access-denied handler, unauthenticated 401 from the entry point)
+                .requestMatchers(HttpMethod.PATCH, "/api/workflow-executions/**").hasRole("ADMIN")
                 // Protected endpoints - require authentication (valid JWT token)
                 .requestMatchers("/api/**").authenticated()
 

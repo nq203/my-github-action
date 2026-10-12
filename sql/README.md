@@ -472,3 +472,13 @@ Recommended workflow when setting up:
 **Created**: 2026-06-21  
 **Status**: ✅ Ready to Use  
 **Quality**: ⭐⭐⭐⭐⭐
+
+---
+
+## Migrations
+
+`migrations/` holds idempotent incremental scripts for existing databases (production runs with
+`ddl-auto=validate`, so new columns must be added by hand before deploying). Run
+`migrations/2026-10-12-execution-live-monitor.sql` before deploying the execution live monitor: it adds
+`workflow_execution_steps.log_line_count`, `workflow_execution_steps.log_truncated` and `users.role`.
+Admins are made by `UPDATE users SET role = 'ADMIN' WHERE username = '...';`.

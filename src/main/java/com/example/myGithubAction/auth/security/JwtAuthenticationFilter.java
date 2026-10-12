@@ -6,6 +6,7 @@ import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Component;
 import org.springframework.web.filter.OncePerRequestFilter;
@@ -13,7 +14,7 @@ import org.springframework.web.filter.OncePerRequestFilter;
 import com.example.myGithubAction.auth.entity.UserPrincipal;
 
 import java.io.IOException;
-import java.util.ArrayList;
+import java.util.List;
 
 /**
  * JWT Authentication Filter
@@ -61,7 +62,7 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
                     new UsernamePasswordAuthenticationToken(
                         userPrincipal,
                         null,
-                        new ArrayList<>() // authorities - you can add roles here
+                        List.of(new SimpleGrantedAuthority("ROLE_" + jwtTokenProvider.getRoleFromToken(token).name()))
                     );
                 SecurityContextHolder.getContext().setAuthentication(authentication);
                 log.debug("Set authentication for user: {} on URI: {}", username, request.getRequestURI());

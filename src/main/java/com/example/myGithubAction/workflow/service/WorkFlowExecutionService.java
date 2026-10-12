@@ -326,9 +326,8 @@ public class WorkFlowExecutionService {
         if (updated == 0) {
             throw new BadRequestException("Execution step status changed concurrently, reload and retry");
         }
-        if (request.getLogs() != null) {
-            executionStepRepository.updateLogs(stepId, request.getLogs(), now);
-        }
+        // request.getLogs() is deliberately ignored: overwriting step logs would break the
+        // per-step line counter (log_line_count) that the live log stream relies on.
         final Long parentExecutionId = step.getExecutionId();
         runAfterCommit(() -> publishQuietly(() -> eventPublisher.stepsOfExecutionChanged(parentExecutionId)));
 

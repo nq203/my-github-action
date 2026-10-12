@@ -69,11 +69,6 @@ public interface WorkFlowExecutionStepRepository extends JpaRepository<WorkFlowE
         Boolean getTruncated();
     }
 
-    @Transactional
-    @Modifying(clearAutomatically = true, flushAutomatically = true)
-    @Query("UPDATE WorkFlowExecutionStep s SET s.logs = :logs, s.updatedAt = :now WHERE s.id = :id")
-    int updateLogs(@Param("id") Long id, @Param("logs") String logs, @Param("now") LocalDateTime now);
-
     /** Fails every step of an execution still marked RUNNING (its worker is gone). */
     @Transactional
     @Modifying(clearAutomatically = true, flushAutomatically = true)
