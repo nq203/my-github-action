@@ -9,7 +9,9 @@ import org.springframework.boot.CommandLineRunner;
 import org.springframework.stereotype.Component;
 
 import java.time.LocalDateTime;
+import java.util.EnumSet;
 import java.util.List;
+import java.util.Set;
 
 /**
  * Marks executions/steps left in RUNNING as FAILED on application startup.
@@ -23,6 +25,7 @@ import java.util.List;
 public class StuckExecutionRecoveryRunner implements CommandLineRunner {
 
     private static final String INTERRUPTED_MESSAGE = "Interrupted by application restart";
+    private static final Set<ExecutionState> RUNNING = EnumSet.of(ExecutionState.RUNNING);
 
     private final WorkFlowExecutionRepository executionRepository;
     private final WorkFlowExecutionStepRepository stepRepository;
@@ -41,21 +44,18 @@ public class StuckExecutionRecoveryRunner implements CommandLineRunner {
     public void run(String... args) {
         LocalDateTime now = LocalDateTime.now();
 
+        // Compare-and-set per row: a row that left RUNNING in the meantime is skipped.
         List<WorkFlowExecution> stuckExecutions = executionRepository.findByStatus(ExecutionState.RUNNING);
         for (WorkFlowExecution execution : stuckExecutions) {
             workspaceManager.deleteWorkspace(execution.getId());
-            execution.setStatus(ExecutionState.FAILED);
-            execution.setErrorMessage(INTERRUPTED_MESSAGE);
-            execution.setEndedAt(now);
+            executionRepository.transition(
+                execution.getId(), RUNNING, ExecutionState.FAILED, now, INTERRUPTED_MESSAGE);
         }
-        executionRepository.saveAll(stuckExecutions);
 
         List<WorkFlowExecutionStep> stuckSteps = stepRepository.findByStatus(ExecutionState.RUNNING);
         for (WorkFlowExecutionStep step : stuckSteps) {
-            step.setStatus(ExecutionState.FAILED);
-            step.setErrorMessage(INTERRUPTED_MESSAGE);
-            step.setEndedAt(now);
+            stepRepository.transition(
+                step.getId(), RUNNING, ExecutionState.FAILED, now, null, INTERRUPTED_MESSAGE);
         }
-        stepRepository.saveAll(stuckSteps);
     }
 }

@@ -2,9 +2,14 @@ package com.example.myGithubAction.workflow.repository;
 
 import com.example.myGithubAction.common.ExecutionState;
 import com.example.myGithubAction.workflow.entity.WorkFlowExecution;
+import jakarta.persistence.LockModeType;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Lock;
+import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
+import org.springframework.transaction.annotation.Transactional;
+import java.time.LocalDateTime;
 import java.util.*;
 
 public interface WorkFlowExecutionRepository extends JpaRepository<WorkFlowExecution, Long> {
@@ -25,4 +30,38 @@ public interface WorkFlowExecutionRepository extends JpaRepository<WorkFlowExecu
 
     @Query("SELECT DISTINCT e FROM WorkFlowExecution e LEFT JOIN FETCH e.executionSteps es WHERE e.status = :status ORDER BY e.id DESC, es.stepOrder ASC")
     List<WorkFlowExecution> findByStatusWithSteps(@Param("status") ExecutionState status);
+
+    // ==================== COMPARE-AND-SET STATE TRANSITIONS ====================
+    // Each method returns the number of rows updated: 0 means the execution was
+    // not in an expected state (lost the race) and nothing was changed.
+
+    /** PENDING → RUNNING. Only the caller that gets 1 owns the execution. */
+    @Transactional
+    @Modifying(clearAutomatically = true, flushAutomatically = true)
+    @Query("UPDATE WorkFlowExecution e SET e.status = com.example.myGithubAction.common.ExecutionState.RUNNING, "
+            + "e.startedAt = :now, e.updatedAt = :now "
+            + "WHERE e.id = :id AND e.status = com.example.myGithubAction.common.ExecutionState.PENDING")
+    int claimPending(@Param("id") Long id, @Param("now") LocalDateTime now);
+
+    /** Moves an execution to {@code to} only if it is currently in one of the {@code from} states. */
+    @Transactional
+    @Modifying(clearAutomatically = true, flushAutomatically = true)
+    @Query("UPDATE WorkFlowExecution e SET e.status = :to, e.endedAt = :endedAt, "
+            + "e.errorMessage = :errorMessage, e.updatedAt = :endedAt "
+            + "WHERE e.id = :id AND e.status IN :from")
+    int transition(@Param("id") Long id,
+                   @Param("from") Collection<ExecutionState> from,
+                   @Param("to") ExecutionState to,
+                   @Param("endedAt") LocalDateTime endedAt,
+                   @Param("errorMessage") String errorMessage);
+
+    @Transactional
+    @Modifying(clearAutomatically = true, flushAutomatically = true)
+    @Query("UPDATE WorkFlowExecution e SET e.logs = :logs, e.updatedAt = :now WHERE e.id = :id")
+    int updateLogs(@Param("id") Long id, @Param("logs") String logs, @Param("now") LocalDateTime now);
+
+    /** Row-locks the execution so a concurrent transition waits until the caller's transaction ends. */
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("SELECT e FROM WorkFlowExecution e WHERE e.id = :id")
+    Optional<WorkFlowExecution> findByIdForUpdate(@Param("id") Long id);
 }

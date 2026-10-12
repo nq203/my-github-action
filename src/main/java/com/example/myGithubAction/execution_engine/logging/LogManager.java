@@ -2,8 +2,7 @@ package com.example.myGithubAction.execution_engine.logging;
 
 import org.springframework.stereotype.Component;
 import com.example.myGithubAction.workflow.repository.WorkFlowExecutionStepRepository;
-import com.example.myGithubAction.workflow.entity.WorkFlowExecutionStep;
-import java.util.Optional;
+import java.time.LocalDateTime;
 
 /**
  * Simple logging manager for step execution.
@@ -27,36 +26,16 @@ public class LogManager {
     /**
      * Appends a log line to step logs.
      *
-     * Loads step from DB, appends line, saves back.
-     * Simple append-only model.
+     * Single atomic UPDATE (logs = logs || line), so concurrent appenders and
+     * engine step-status writes can never overwrite each other's logs.
      *
      * @param stepId the step ID
      * @param logLine the log line to append
      */
     public void appendLog(Long stepId, String logLine) {
-        // 1. Load step from repository by stepId
-        Optional<WorkFlowExecutionStep> optionalStep = stepRepository.findById(stepId);
-
-        if (optionalStep.isEmpty()) {
-            // Log not found, skip
-            return;
-        }
-
-        WorkFlowExecutionStep step = optionalStep.get();
-
-        // 2. Get current logs (or empty string)
-        String currentLogs = step.getLogs() != null ? step.getLogs() : "";
-
-        // 3. Append: currentLogs + logLine + "\n"
-        String updatedLogs = currentLogs + logLine + "\n";
-
-        // 4. Save step back to repository
-        step.setLogs(updatedLogs);
-
         try {
-            stepRepository.save(step);
+            stepRepository.appendLog(stepId, logLine + "\n", LocalDateTime.now());
         } catch (Exception e) {
-            // 5. Handle exceptions gracefully
             System.err.println("Failed to append log for step " + stepId + ": " + e.getMessage());
         }
     }

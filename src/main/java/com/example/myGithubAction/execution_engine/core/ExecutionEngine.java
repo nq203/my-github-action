@@ -1,10 +1,8 @@
 package com.example.myGithubAction.execution_engine.core;
 
-import com.example.myGithubAction.workflow.entity.WorkFlowExecution;
 import com.example.myGithubAction.workflow.entity.WorkFlowExecutionStep;
 import com.example.myGithubAction.execution_engine.executor.StepExecutor;
 import com.example.myGithubAction.execution_engine.logging.LogManager;
-import com.example.myGithubAction.auth.exception.ResourceNotFoundException;
 import com.example.myGithubAction.common.ExecutionState;
 import com.example.myGithubAction.execution_engine.dto.StepExecutionResult;
 import com.example.myGithubAction.execution_engine.error.ErrorHandler;
@@ -12,8 +10,11 @@ import com.example.myGithubAction.workflow.repository.WorkFlowExecutionRepositor
 import com.example.myGithubAction.workflow.repository.WorkFlowExecutionStepRepository;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
+import java.time.Duration;
 import java.time.LocalDateTime;
+import java.util.EnumSet;
 import java.util.List;
+import java.util.Set;
 
 /**
  * Main ExecutionEngine orchestrator.
@@ -24,12 +25,17 @@ import java.util.List;
  * - Tracking status
  * - Handling errors
  *
+ * All execution/step state changes are compare-and-set updates (see
+ * ExecutionState for the allowed transitions): the engine never save()s a
+ * loaded entity, so a concurrent cancel can never be overwritten.
  */
 @Service
 public class ExecutionEngine {
 
     private static final long RETRY_DELAY_MS = 2000;
     private static final long STEP_TIMEOUT_MS = 600000; // 10 minutes
+    private static final Set<ExecutionState> EXECUTION_RUNNING = EnumSet.of(ExecutionState.RUNNING);
+    private static final Set<ExecutionState> STEP_RUNNING = EnumSet.of(ExecutionState.RUNNING);
 
     private final WorkFlowExecutionRepository workFlowExecutionRepository;
     private final WorkFlowExecutionStepRepository workFlowExecutionStepRepository;
@@ -62,24 +68,25 @@ public class ExecutionEngine {
      * Main entry point for workflow execution.
      * Runs in a separate thread so the calling HTTP request
      * can return immediately with the execution ID.
-     * Each step is executed in its own transaction so partial
-     * progress is persisted even if a later step fails.
+     *
+     * The execution is first claimed with an atomic PENDING → RUNNING update.
+     * If the claim affects 0 rows (cancelled while PENDING, already claimed by
+     * another worker, duplicate delivery) this call does nothing at all.
      *
      * @param executionId the execution ID from database
-     * @throws ResourceNotFoundException if execution not found
      */
     @Async("workflowExecutor")
     public void startExecution(Long executionId) {
         cancellationRegistry.register(executionId);
         boolean workspaceCreated = false;
         try {
-            // 1. Load execution from DB
-            WorkFlowExecution execution = workFlowExecutionRepository.findById(executionId)
-                    .orElseThrow(() -> new ResourceNotFoundException("Execution not found"));
-
             if (cancellationRegistry.isCancelled(executionId)) {
-                // Cancelled before this async task even started (e.g. while PENDING) -
-                // DB status is already CANCELLED, don't overwrite it with RUNNING.
+                // Cancelled before this async task even started; DB is already CANCELLED.
+                return;
+            }
+
+            // 1. Claim: PENDING → RUNNING (+ startedAt). Loses the race → nothing to do.
+            if (workFlowExecutionRepository.claimPending(executionId, LocalDateTime.now()) == 0) {
                 return;
             }
 
@@ -87,36 +94,29 @@ public class ExecutionEngine {
                 workspaceManager.createWorkspace(executionId);
                 workspaceCreated = true;
             } catch (Exception e) {
-                if (!cancellationRegistry.isCancelled(executionId)) {
-                    handleError(execution, e);
-                }
+                handleError(executionId, e);
                 return;
             }
 
-            // 2. Set status → RUNNING and set startedAt
-            execution.setStatus(ExecutionState.RUNNING);
-            execution.setStartedAt(LocalDateTime.now());
-            workFlowExecutionRepository.save(execution);
-
-            // 3. Load steps in order
+            // 2. Load steps in order
             List<WorkFlowExecutionStep> steps = workFlowExecutionStepRepository.findByExecutionIdOrderByStepOrder(executionId);
 
-            // 4. Execute each step sequentially, stopping on cancel or failure
+            // 3. Execute each step sequentially, stopping on cancel or failure
             for (WorkFlowExecutionStep step : steps) {
                 if (cancellationRegistry.isCancelled(executionId)) {
-                    // DB status is already CANCELLED (set by cancelExecution) - don't overwrite it
+                    // DB status is already CANCELLED (set by cancelExecution) - nothing to write
                     return;
                 }
 
-                boolean success = executeStep(execution, step);
+                boolean success = executeStep(executionId, step);
                 if (!success) {
-                    // Fail-fast: status already set to FAILED by executeStep/handleError
+                    // Fail-fast: execution already moved to FAILED (or CANCELLED) by handleError
                     return;
                 }
             }
 
-            // 5. Handle completion
-            handleCompletion(execution);
+            // 4. Handle completion
+            handleCompletion(executionId);
         } finally {
             if (workspaceCreated) {
                 workspaceManager.deleteWorkspace(executionId);
@@ -129,65 +129,54 @@ public class ExecutionEngine {
      * Executes a single step, retrying on transient errors up to a fixed
      * number of attempts.
      *
-     * @param execution the workflow execution
+     * @param executionId the owning workflow execution
      * @param step the execution step
      * @return true if the step ended in SUCCESS, false if it ended in FAILED
      */
-    private boolean executeStep(WorkFlowExecution execution, WorkFlowExecutionStep step) {
+    private boolean executeStep(Long executionId, WorkFlowExecutionStep step) {
+        final Long stepId = step.getId();
         int maxRetries = 3;
         int attempt = 0;
 
         while (true) {
+            LocalDateTime startedAt = LocalDateTime.now();
             try {
-                // 1. Set step status → RUNNING + timestamp
-                step.setStatus(ExecutionState.RUNNING);
-                step.setStartedAt(LocalDateTime.now());
-                workFlowExecutionStepRepository.save(step);
+                // 1. Step → RUNNING + timestamp (targeted update, logs untouched)
+                workFlowExecutionStepRepository.markRunning(stepId, startedAt);
 
                 // 2. Call StepExecutor.execute() using injected instance
-                StepExecutionResult result =
-                    this.stepExecutor.execute(step);
+                StepExecutionResult result = this.stepExecutor.execute(step);
 
                 // 3. Capture logs
                 if (result.getOutput() != null && !result.getOutput().isEmpty()) {
-                    logManager.appendLog(step.getId(), result.getOutput());
+                    logManager.appendLog(stepId, result.getOutput());
                 }
                 if (result.getErrorMessage() != null && !result.getErrorMessage().isEmpty()) {
-                    logManager.appendLog(step.getId(), "[ERROR] " + result.getErrorMessage());
+                    logManager.appendLog(stepId, "[ERROR] " + result.getErrorMessage());
                 }
 
                 // 4. Update step status based on result
-                if (result.isSuccess()) {
-                    step.setStatus(ExecutionState.SUCCESS);
-                } else {
+                if (!result.isSuccess()) {
                     String errorMsg = result.getErrorMessage() != null
                         ? result.getErrorMessage()
                         : "Step execution failed with exit code " + result.getExitCode();
                     throw new RuntimeException(errorMsg);
                 }
-                step.setEndedAt(LocalDateTime.now());
 
-                // Calculate duration in milliseconds
-                if (step.getStartedAt() != null) {
-                    long durationMs = java.time.Duration.between(
-                        step.getStartedAt(),
-                        step.getEndedAt()
-                    ).toMillis();
-                    step.setDuration(durationMs);
-                }
-
-                workFlowExecutionStepRepository.save(step);
+                LocalDateTime endedAt = LocalDateTime.now();
+                workFlowExecutionStepRepository.transition(stepId, STEP_RUNNING, ExecutionState.SUCCESS,
+                    endedAt, Duration.between(startedAt, endedAt).toMillis(), null);
                 return true;
 
             } catch (Exception e) {
-                boolean cancelled = cancellationRegistry.isCancelled(execution.getId());
+                boolean cancelled = cancellationRegistry.isCancelled(executionId);
 
                 // Check shouldRetry()
                 if (attempt < maxRetries && errorHandler.shouldRetry(e.getMessage(), cancelled)) {
                     attempt++;
 
                     // Log retry attempt
-                    logManager.appendLog(step.getId(),
+                    logManager.appendLog(stepId,
                         String.format("Retry attempt %d/%d: %s",
                             attempt, maxRetries, e.getMessage()));
 
@@ -201,26 +190,14 @@ public class ExecutionEngine {
                     continue;
                 }
 
-                // Update step status → FAILED
-                step.setStatus(ExecutionState.FAILED);
-                step.setErrorMessage(e.getMessage());
-                step.setEndedAt(LocalDateTime.now());
-
-                // Calculate duration in milliseconds
-                if (step.getStartedAt() != null) {
-                    long durationMs = java.time.Duration.between(
-                        step.getStartedAt(),
-                        step.getEndedAt()
-                    ).toMillis();
-                    step.setDuration(durationMs);
-                }
-
-                // Capture error log
-                logManager.appendLog(step.getId(), "[FAILED] " + e.getMessage());
-                workFlowExecutionStepRepository.save(step);
+                // Capture error log, then step → FAILED
+                logManager.appendLog(stepId, "[FAILED] " + e.getMessage());
+                LocalDateTime endedAt = LocalDateTime.now();
+                workFlowExecutionStepRepository.transition(stepId, STEP_RUNNING, ExecutionState.FAILED,
+                    endedAt, Duration.between(startedAt, endedAt).toMillis(), e.getMessage());
 
                 // Handle workflow error
-                handleError(execution, e);
+                handleError(executionId, e);
                 return false;
             }
         }
@@ -229,56 +206,32 @@ public class ExecutionEngine {
     /**
      * Handles completion of execution.
      *
-     * Called after all steps are executed.
-     * Determines final status and flushes logs.
-     *
-     * @param execution the workflow execution
+     * Called after all steps are executed. RUNNING → SUCCESS/FAILED is a
+     * compare-and-set, so it is a no-op if the execution was cancelled meanwhile.
      */
-    private void handleCompletion(WorkFlowExecution execution) {
+    private void handleCompletion(Long executionId) {
         // 1. Load all steps for this execution
-        java.util.List<WorkFlowExecutionStep> steps = workFlowExecutionStepRepository
-            .findByExecutionId(execution.getId());
+        List<WorkFlowExecutionStep> steps = workFlowExecutionStepRepository.findByExecutionId(executionId);
 
         // 2. Determine final status - all steps must be SUCCESS
         boolean allSuccessful = steps.stream()
             .allMatch(s -> s.getStatus() == ExecutionState.SUCCESS);
+        ExecutionState finalStatus = allSuccessful ? ExecutionState.SUCCESS : ExecutionState.FAILED;
 
-        // 3. Set execution.status
-        ExecutionState finalStatus = allSuccessful
-            ? ExecutionState.SUCCESS
-            : ExecutionState.FAILED;
-        execution.setStatus(finalStatus);
+        // 3. Atomically finish (status + endedAt)
+        workFlowExecutionRepository.transition(
+            executionId, EXECUTION_RUNNING, finalStatus, LocalDateTime.now(), null);
 
-        // 4. Set execution.endedAt
-        execution.setEndedAt(LocalDateTime.now());
-
-        // Save to database
-        workFlowExecutionRepository.save(execution);
-
-        // 5. Flush logs to database
+        // 4. Flush logs to database
         logManager.flush();
     }
 
     /**
-     * Handles execution errors.
-     *
-     * Called when execution fails.
-     * Persists error state to database.
-     *
-     * @param execution the workflow execution
-     * @param error the exception that occurred
+     * Handles execution errors: RUNNING → FAILED with the error message.
+     * Affects 0 rows (and so changes nothing) if a cancel already won.
      */
-    private void handleError(WorkFlowExecution execution, Exception error) {
-        // 1. Set execution.status → FAILED
-        execution.setStatus(ExecutionState.FAILED);
-
-        // 2. Set error message
-        execution.setErrorMessage(error.getMessage());
-
-        // 3. Set endedAt timestamp
-        execution.setEndedAt(LocalDateTime.now());
-
-        // 4. Save to database
-        workFlowExecutionRepository.save(execution);
+    private void handleError(Long executionId, Exception error) {
+        workFlowExecutionRepository.transition(
+            executionId, EXECUTION_RUNNING, ExecutionState.FAILED, LocalDateTime.now(), error.getMessage());
     }
 }

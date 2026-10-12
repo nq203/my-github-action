@@ -5,6 +5,7 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
+import com.example.myGithubAction.auth.exception.BadRequestException;
 import com.example.myGithubAction.auth.exception.ResourceNotFoundException;
 import com.example.myGithubAction.common.ExecutionState;
 import com.example.myGithubAction.workflow.dto.WorkFlowExecutionRequest;
@@ -124,12 +125,9 @@ public class WorkFlowExecutionService {
      * @param executionId the execution that could not be submitted
      */
     private void markExecutionRejected(Long executionId) {
-        executionRepository.findById(executionId).ifPresent(execution -> {
-            execution.setStatus(ExecutionState.FAILED);
-            execution.setErrorMessage("Execution rejected: thread pool and queue are full");
-            execution.setEndedAt(LocalDateTime.now());
-            executionRepository.save(execution);
-        });
+        executionRepository.transition(
+                executionId, EnumSet.of(ExecutionState.PENDING), ExecutionState.FAILED,
+                LocalDateTime.now(), "Execution rejected: thread pool and queue are full");
     }
 
     /**
@@ -172,54 +170,75 @@ public class WorkFlowExecutionService {
     }
 
     /**
-     * Update execution status
+     * Update execution status.
+     *
+     * The requested transition must be valid per {@link ExecutionState} and is applied
+     * with a compare-and-set, so it can never overwrite a state the engine or a cancel
+     * has moved the execution to in the meantime.
      */
     @Transactional
     public WorkFlowExecutionResponse updateExecutionStatus(Long executionId, ExecutionStatusUpdateRequest request) {
         WorkFlowExecution execution = executionRepository.findById(executionId)
                 .orElseThrow(() -> new ResourceNotFoundException("Execution not found with id: " + executionId));
 
-        // Parse status from request
-        ExecutionState status = ExecutionState.valueOf(request.getStatus());
-        execution.setStatus(status);
-        execution.setLogs(request.getLogs());
-        execution.setErrorMessage(request.getErrorMessage());
-
-        // Set time based on status
-        if (ExecutionState.RUNNING.equals(status)) {
-            execution.setStartedAt(LocalDateTime.now());
-        }
-        if (ExecutionState.SUCCESS.equals(status) || ExecutionState.FAILED.equals(status) || ExecutionState.CANCELLED.equals(status)) {
-            execution.setEndedAt(LocalDateTime.now());
+        ExecutionState current = execution.getStatus();
+        ExecutionState target = parseState(request.getStatus());
+        if (!current.canTransitionTo(target)) {
+            throw new BadRequestException("Invalid status transition: " + current + " -> " + target);
         }
 
-        WorkFlowExecution updatedExecution = executionRepository.save(execution);
-        return mapToExecutionResponse(updatedExecution);
+        LocalDateTime now = LocalDateTime.now();
+        int updated = ExecutionState.RUNNING.equals(target)
+                ? executionRepository.claimPending(executionId, now)
+                : executionRepository.transition(
+                        executionId, EnumSet.of(current), target, now, request.getErrorMessage());
+        if (updated == 0) {
+            throw new BadRequestException("Execution status changed concurrently, reload and retry");
+        }
+        if (request.getLogs() != null) {
+            executionRepository.updateLogs(executionId, request.getLogs(), now);
+        }
+
+        return getExecution(executionId);
     }
 
     /**
-     * Cancel an execution
+     * Cancel an execution.
+     *
+     * PENDING|RUNNING → CANCELLED as a compare-and-set. If the execution already reached a
+     * terminal state the call is an idempotent no-op that returns the current state
+     * (a finished execution is never overwritten with CANCELLED).
      */
     @Transactional
     public WorkFlowExecutionResponse cancelExecution(Long executionId) {
-        WorkFlowExecution execution = executionRepository.findById(executionId)
+        executionRepository.findById(executionId)
                 .orElseThrow(() -> new ResourceNotFoundException("Execution not found with id: " + executionId));
 
-        execution.setStatus(ExecutionState.CANCELLED);
-        execution.setEndedAt(LocalDateTime.now());
-
-        WorkFlowExecution updatedExecution = executionRepository.save(execution);
-        cancellationRegistry.cancel(executionId);
-        return mapToExecutionResponse(updatedExecution);
+        int updated = executionRepository.transition(
+                executionId, ExecutionState.CANCELLABLE, ExecutionState.CANCELLED, LocalDateTime.now(), null);
+        if (updated > 0) {
+            // Signal the in-memory registry only once CANCELLED is committed, so the engine
+            // never observes the flag before the DB state.
+            runAfterCommit(() -> cancellationRegistry.cancel(executionId));
+        }
+        return getExecution(executionId);
     }
 
     /**
-     * Delete an execution and all its steps
+     * Delete an execution and all its steps.
+     *
+     * Only terminal executions can be deleted. The row lock makes the status check
+     * race-free: a concurrent claim/transition waits until this transaction ends.
      */
     @Transactional
     public void deleteExecution(Long executionId) {
-        WorkFlowExecution execution = executionRepository.findById(executionId)
+        WorkFlowExecution execution = executionRepository.findByIdForUpdate(executionId)
                 .orElseThrow(() -> new ResourceNotFoundException("Execution not found with id: " + executionId));
+
+        if (!execution.getStatus().isTerminal()) {
+            throw new BadRequestException(
+                    "Cannot delete execution in status " + execution.getStatus() + ", cancel it first");
+        }
 
         // Delete all execution steps
         List<WorkFlowExecutionStep> executionSteps = executionStepRepository.findByExecutionId(executionId);
@@ -251,34 +270,38 @@ public class WorkFlowExecutionService {
     }
 
     /**
-     * Update execution step status
+     * Update execution step status (validated, compare-and-set; see updateExecutionStatus).
      */
     @Transactional
     public WorkFlowExecutionStepResponse updateExecutionExecutionState(Long stepId, ExecutionStatusUpdateRequest request) {
         WorkFlowExecutionStep step = executionStepRepository.findById(stepId)
                 .orElseThrow(() -> new ResourceNotFoundException("Execution step not found with id: " + stepId));
 
-        // Parse status from request
-        ExecutionState status = ExecutionState.valueOf(request.getStatus());
-        step.setStatus(status);
-        step.setLogs(request.getLogs());
-        step.setErrorMessage(request.getErrorMessage());
-
-        // Set time based on status
-        if (ExecutionState.RUNNING.equals(status)) {
-            step.setStartedAt(LocalDateTime.now());
-        }
-        if (ExecutionState.SUCCESS.equals(status) || ExecutionState.FAILED.equals(status) || ExecutionState.CANCELLED.equals(status)) {
-            step.setEndedAt(LocalDateTime.now());
-
-            // Calculate duration if both times are set
-            if (step.getStartedAt() != null && step.getEndedAt() != null) {
-                step.setDuration(java.time.temporal.ChronoUnit.MILLIS.between(step.getStartedAt(), step.getEndedAt()));
-            }
+        ExecutionState current = step.getStatus();
+        ExecutionState target = parseState(request.getStatus());
+        if (!current.canTransitionTo(target)) {
+            throw new BadRequestException("Invalid status transition: " + current + " -> " + target);
         }
 
-        WorkFlowExecutionStep updatedStep = executionStepRepository.save(step);
-        return mapToExecutionStepResponse(updatedStep);
+        LocalDateTime now = LocalDateTime.now();
+        int updated;
+        if (ExecutionState.RUNNING.equals(target)) {
+            updated = executionStepRepository.markRunning(stepId, now);
+        } else {
+            Long duration = step.getStartedAt() != null
+                    ? java.time.temporal.ChronoUnit.MILLIS.between(step.getStartedAt(), now)
+                    : null;
+            updated = executionStepRepository.transition(
+                    stepId, EnumSet.of(current), target, now, duration, request.getErrorMessage());
+        }
+        if (updated == 0) {
+            throw new BadRequestException("Execution step status changed concurrently, reload and retry");
+        }
+        if (request.getLogs() != null) {
+            executionStepRepository.updateLogs(stepId, request.getLogs(), now);
+        }
+
+        return getExecutionStep(stepId);
     }
 
     /**
@@ -292,6 +315,27 @@ public class WorkFlowExecutionService {
     }
 
     // ==================== HELPER METHODS ====================
+
+    private ExecutionState parseState(String status) {
+        try {
+            return ExecutionState.valueOf(status);
+        } catch (IllegalArgumentException | NullPointerException e) {
+            throw new BadRequestException("Unknown execution status: " + status);
+        }
+    }
+
+    private void runAfterCommit(Runnable action) {
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    action.run();
+                }
+            });
+        } else {
+            action.run();
+        }
+    }
 
     private WorkFlowExecutionResponse mapToExecutionResponse(WorkFlowExecution execution) {
         return mapToExecutionResponse(execution, true);
